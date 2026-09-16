@@ -1,0 +1,14 @@
+name: PackHost
+version: '1.0.0'
+main: com.mineuno.packhost.PackHostPlugin
+api-version: '26.2'
+description: 通用材质包管理：合并多个资源包并通过内置 HTTP 服务下发给客户端
+author: ubuntu
+commands:
+  packhost:
+    description: PackHost 管理命令
+    usage: /packhost reload|url|status|send <玩家>
+    permission: packhost.admin
+permissions:
+  packhost.admin:
+    default: op

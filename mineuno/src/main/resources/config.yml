@@ -1,0 +1,45 @@
+# MineUNO 配置
+# 竞技场：用 /uno setarena 站在想要的位置现场设置
+arena:
+  world: hub
+  x: 8.5
+  y: 64.0
+  z: 3.5
+
+table:
+  size: 4.6          # 桌面边长（方块）
+  height: 0.60       # 桌面相对竞技场中心的高度
+  seat-radius-x: 3.4 # 座位椭圆半径 X
+  seat-radius-z: 2.8 # 座位椭圆半径 Z
+  card-scale: 1.5    # 桌上卡牌显示缩放（1.5 ≈ 0.75 方块宽）
+
+seat:
+  y-offset: -0.9 # 隐形坐骑相对座位的高度偏移（调坐姿高矮）
+
+game:
+  min-players: 2
+  max-players: 8
+  starting-cards: 7
+  turn-time: 30        # 回合超时（秒）
+  challenge-time: 8    # 质疑窗口（秒）
+  reconnect-grace: 60  # 断线保留时间（秒）
+  seat-lock-radius: 0.6 # 对局中允许离开座位的距离（方块）
+  interaction-range: 6.0 # 对局中的交互距离（方便点到桌面）
+  default-mode: QUICK  # QUICK / CLASSIC
+
+rules:
+  wild4-challenge: true # 允许对 Wild +4 质疑
+
+hand:
+  distance: 1.5 # 手牌离座位的距离（半径越大越不容易重叠）
+  height: 1.10   # 手牌离地高度
+  spacing: 0.30  # 手牌之间的间距
+  scale: 0.95    # 手牌显示大小
+  tilt: -30      # 手牌后仰角度
+  yaw-offset: 0  # 手牌朝向偏移      # 手牌后仰角度（低头看牌用负数）
+
+visual:
+  animations: true
+  particles: true
+  sounds: true
+  use-item-models: true # true=使用 PackHost 材质包；false=原版物品兜底

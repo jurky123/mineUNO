@@ -1,0 +1,14 @@
+name: MineUNO
+version: '1.0.0'
+main: com.mineuno.MineUnoPlugin
+api-version: '26.2'
+description: UNO 卡牌游戏（3D 桌面 + 手牌 GUI + 完整经典规则）
+author: ubuntu
+commands:
+  uno:
+    description: MineUNO 主命令
+    usage: /uno
+permissions:
+  mineuno.admin:
+    description: 允许 /uno setarena 与 /uno reload
+    default: op

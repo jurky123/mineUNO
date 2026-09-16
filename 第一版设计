@@ -1,0 +1,3215 @@
+# MineUNO — Minecraft Java / Paper 26.2 UNO 插件设计方案
+
+## 0. 项目目标
+
+开发一个运行于 **Minecraft Java Edition 26.2 + Paper 26.2** 的多人 UNO 小游戏插件。
+
+核心目标不是简单做一个“箱子 GUI 里的 UNO”，而是做成一个具有完整游戏体验的桌游系统：
+
+* 2～8 名玩家
+* 完整经典 UNO 规则
+* 多桌同时游戏
+* 3D UNO 桌面
+* 玩家座位
+* 实体牌堆
+* 出牌 / 摸牌动画
+* Wild 颜色选择
+* Wild Draw 4 质疑
+* UNO 喊牌 / 抓 UNO
+* 高质量手牌 UI
+* 回合计时和游戏 HUD
+* 音效、粒子和视觉反馈
+* 断线重连
+* 观战
+* 可配置房规
+* 无客户端 Mod
+
+推荐形式：
+
+**Paper Plugin + Server Resource Pack**
+
+资源包仅用于视觉增强，不引入 Fabric/NeoForge 客户端依赖。
+
+---
+
+# 1. 技术基线
+
+## 1.1 环境
+
+目标环境固定：
+
+```text
+Minecraft: 26.2
+Server: Paper 26.2
+Java: 25
+Build: Gradle Kotlin DSL
+```
+
+Paper 官方 26.2 开发配置使用：
+
+```kotlin
+dependencies {
+    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
+}
+
+java {
+    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+}
+```
+
+Paper 26.2 要求 Java 25，并允许：
+
+```yaml
+api-version: '26.2'
+```
+
+### 原则
+
+尽量只使用 Paper/Bukkit 正式 API。
+
+V1 禁止：
+
+```text
+NMS
+Reflection hack
+ProtocolLib 强依赖
+客户端 Mod
+```
+
+Paper 26.2 已提供足够的 Display Entity、Interaction Entity、Adventure、Data Component API 来完成本项目。
+
+---
+
+# 2. UNO 基础规则
+
+## 2.1 默认使用经典 108 张牌
+
+采用传统经典 UNO：
+
+### 每种颜色
+
+颜色：
+
+```text
+RED
+YELLOW
+GREEN
+BLUE
+```
+
+每种颜色：
+
+```text
+0 × 1
+
+1~9 × 2
+
+Skip × 2
+Reverse × 2
+Draw Two × 2
+```
+
+即：
+
+```text
+19 张数字牌 × 4 = 76
+6 张功能牌 × 4 = 24
+Wild × 4
+Wild Draw Four × 4
+
+总计 = 108
+```
+
+Mattel 的经典 UNO 产品说明也是这一 108 张结构。
+
+不要把 Blank Card、自定义 Wild 等新版附加牌放入默认牌库。
+
+后续可以通过 Expansion API 增加。
+
+---
+
+# 3. 默认游戏规则
+
+## 3.1 开局
+
+人数：
+
+```text
+MIN_PLAYERS = 2
+MAX_PLAYERS = 8
+```
+
+每人：
+
+```text
+7 张牌
+```
+
+随机洗牌。
+
+随机决定起始玩家。
+
+翻开牌堆顶牌作为 Discard Pile。
+
+---
+
+## 3.2 合法出牌
+
+当前弃牌：
+
+```text
+Red 7
+```
+
+玩家可以出：
+
+```text
+任意 Red
+任意颜色 7
+Wild
+合法的 Wild Draw Four
+```
+
+功能牌同样可以按：
+
+```text
+颜色相同
+
+或者
+
+功能类型相同
+```
+
+例如：
+
+```text
+Blue Skip
+→ Red Skip
+
+合法
+```
+
+---
+
+# 4. 功能牌
+
+## Draw Two
+
+下一位玩家：
+
+```text
+摸 2
+跳过回合
+```
+
+默认 **禁止叠牌**。
+
+因此：
+
+```text
++2
+→ 下一玩家不能再出 +2
+→ 必须摸 2 并 Skip
+```
+
+---
+
+## Skip
+
+跳过下一玩家。
+
+---
+
+## Reverse
+
+反转：
+
+```text
+CLOCKWISE
+↕
+
+COUNTER_CLOCKWISE
+```
+
+对于两人局：
+
+```text
+Reverse ≈ Skip
+```
+
+因此出 Reverse 后自己再次行动。
+
+经典官方规则同样对两人局做这一特殊处理。
+
+---
+
+# 5. Wild
+
+普通 Wild：
+
+```text
+任何时候均可打出
+```
+
+出牌后必须选择：
+
+```text
+RED
+YELLOW
+GREEN
+BLUE
+```
+
+新的颜色记为：
+
+```java
+activeColor
+```
+
+不要修改 Wild 卡本身。
+
+---
+
+# 6. Wild Draw Four
+
+这是整个 RuleEngine 最重要的地方之一。
+
+## 合法条件
+
+玩家只有在：
+
+> 手牌中不存在当前 activeColor 的普通颜色牌
+
+时才可以合法地打出 Wild Draw Four。
+
+注意：
+
+当前弃牌：
+
+```text
+Red 7
+```
+
+玩家有：
+
+```text
+Blue 7
+Blue Reverse
+Wild Draw Four
+```
+
+此时 +4 **合法**。
+
+因为虽然存在：
+
+```text
+相同数字
+```
+
+但不存在：
+
+```text
+Red 卡
+```
+
+Mattel 官方规则明确规定判断依据是**是否持有当前颜色**，而不是是否持有相同数字或功能。
+
+---
+
+# 7. Wild Draw Four 质疑机制
+
+玩家 A 打出：
+
+```text
+Wild Draw Four
+```
+
+并选择颜色。
+
+轮到 B。
+
+B 不应该立刻强制摸 4。
+
+进入：
+
+```text
+WILD4_CHALLENGE
+```
+
+B UI 显示：
+
+```text
+[接受 +4]
+
+[质疑]
+```
+
+默认给予：
+
+```text
+8 秒
+```
+
+选择时间。
+
+---
+
+## B 接受
+
+```text
+B 摸 4
+B Skip
+```
+
+---
+
+## B 质疑
+
+必须保存 A **出 +4 之前**的状态：
+
+```java
+Wild4Context {
+    UUID offender;
+    UUID challenger;
+
+    CardColor previousActiveColor;
+    CardColor chosenColor;
+
+    boolean offenderHadMatchingColor;
+}
+```
+
+不能事后重新判断。
+
+### A 当时有 previousActiveColor
+
+说明非法 +4。
+
+结果：
+
+```text
+A 摸 4
+
+B 不摸牌
+
+B 保留自己的正常回合
+```
+
+### A 当时没有 previousActiveColor
+
+说明合法。
+
+结果：
+
+```text
+B 摸 6
+
+B Skip
+```
+
+官方规则即：
+
+```text
+质疑成功 → +4 玩家自己摸4
+质疑失败 → 质疑者摸6
+```
+
+### 可选视觉
+
+质疑时：
+
+只向 Challenger 打开一个 2 秒只读 UI：
+
+```text
+「对方刚才的手牌」
+```
+
+显示对方当时的手牌。
+
+这符合实体 UNO 中“向质疑者展示手牌”的规则。
+
+其他玩家不能看到。
+
+---
+
+# 8. 摸牌规则
+
+不能错误实现成：
+
+```text
+一直摸到有牌可以出
+```
+
+默认经典模式只摸：
+
+```text
+1 张
+```
+
+而且玩家即使手里本来有可出的牌，也允许主动选择摸牌。
+
+如果摸出的牌可出：
+
+进入：
+
+```text
+POST_DRAW_DECISION
+```
+
+只能选择：
+
+```text
+出刚摸到的这张牌
+
+或者
+
+结束回合
+```
+
+不能：
+
+```text
+摸一张之后改出原手牌里的另一张
+```
+
+---
+
+# 9. UNO 机制
+
+现代 Mattel 说明中：
+
+当手牌从：
+
+```text
+2
+→
+1
+```
+
+时必须喊：
+
+```text
+UNO!
+```
+
+如果没有喊，并在下一位玩家开始行动之前被其他玩家抓到：
+
+```text
+罚摸 2 张
+```
+
+---
+
+# 10. UNO 的数字化实现
+
+不要简单设计成：
+
+```text
+玩家到1张自动算喊UNO
+```
+
+这样就失去 UNO 的游戏性。
+
+设计一个：
+
+```java
+UnoCallState
+```
+
+玩家可以在剩余两张时提前按：
+
+```text
+UNO!
+```
+
+状态：
+
+```java
+unoArmed = true;
+```
+
+然后打出一张。
+
+如果手牌变成：
+
+```text
+1
+```
+
+则：
+
+```text
+safeFromCatch = true
+```
+
+---
+
+如果没有提前喊：
+
+```java
+unoVulnerable = true;
+```
+
+其他玩家出现：
+
+```text
+⚠ XXX 忘记喊 UNO！
+
+[抓 UNO]
+```
+
+忘记喊的玩家自己也仍然可以：
+
+```text
+/uno uno
+```
+
+完成补喊。
+
+---
+
+## UNO Window 结束条件
+
+不是固定 3 秒。
+
+应忠实实现为：
+
+> 下一位玩家进行了自己的第一次实际游戏动作。
+
+即下一玩家：
+
+```text
+摸牌
+
+或者
+
+出牌
+```
+
+之前，都允许：
+
+```text
+补喊 UNO
+```
+
+或者：
+
+```text
+抓 UNO
+```
+
+谁先触发服务器事件谁生效。
+
+所有处理发生在服务器主线程，因此不会出现并发状态冲突。
+
+---
+
+# 11. 游戏结束
+
+玩家最后一张牌被打出：
+
+```text
+ROUND_END
+```
+
+但如果最后一张是：
+
+```text
+Draw Two
+Wild Draw Four
+```
+
+需要先执行对应罚牌。
+
+然后再结算。
+
+---
+
+# 12. 两种胜利模式
+
+建议同时支持。
+
+## QUICK
+
+适合 Minecraft 小游戏。
+
+```text
+第一个手牌清零的人获胜
+```
+
+然后游戏结束。
+
+默认推荐此模式。
+
+---
+
+## CLASSIC_500
+
+官方传统计分：
+
+```text
+数字牌 = 数字本身
+
+Skip = 20
+Reverse = 20
+Draw Two = 20
+
+Wild = 50
+Wild Draw Four = 50
+```
+
+赢家获得所有其他玩家剩余牌的分数。
+
+累计：
+
+```text
+500 分
+```
+
+结束整个 Match。
+
+---
+
+# 13. 核心架构原则
+
+必须严格分成：
+
+```text
+Game Engine
+    ↓
+Presentation
+```
+
+Rule Engine **不得依赖 Bukkit GUI**。
+
+这样可以完整 Unit Test。
+
+推荐：
+
+```text
+domain/
+game/
+service/
+presentation/
+listener/
+command/
+persistence/
+```
+
+---
+
+# 14. 推荐代码结构
+
+```text
+com.example.mineuno
+
+├── MineUnoPlugin.java
+│
+├── domain
+│   ├── CardColor.java
+│   ├── CardType.java
+│   ├── CardFace.java
+│   ├── CardInstance.java
+│   ├── Direction.java
+│   └── GameMode.java
+│
+├── game
+│   ├── UnoMatch.java
+│   ├── UnoPlayer.java
+│   ├── MatchState.java
+│   ├── TurnState.java
+│   ├── RuleEngine.java
+│   ├── ActionResolver.java
+│   ├── TurnManager.java
+│   ├── DeckFactory.java
+│   ├── DeckManager.java
+│   ├── ScoreManager.java
+│   ├── Wild4Context.java
+│   ├── UnoCallState.java
+│   └── PendingAction.java
+│
+├── service
+│   ├── MatchManager.java
+│   ├── LobbyManager.java
+│   ├── ArenaManager.java
+│   ├── SeatManager.java
+│   ├── ResourcePackService.java
+│   └── ReconnectService.java
+│
+├── presentation
+│   ├── table
+│   │   ├── TableRenderer.java
+│   │   ├── TableEntityRegistry.java
+│   │   ├── SeatRenderer.java
+│   │   └── PileRenderer.java
+│   │
+│   ├── animation
+│   │   ├── AnimationService.java
+│   │   ├── DealAnimation.java
+│   │   ├── DrawAnimation.java
+│   │   └── PlayAnimation.java
+│   │
+│   ├── menu
+│   │   ├── LobbyMenu.java
+│   │   ├── HandMenu.java
+│   │   ├── ColorPickerMenu.java
+│   │   ├── ChallengeMenu.java
+│   │   ├── ChallengeRevealMenu.java
+│   │   └── RuleSettingsMenu.java
+│   │
+│   ├── hud
+│   │   ├── GameHud.java
+│   │   ├── BossBarHud.java
+│   │   └── ActionBarHud.java
+│   │
+│   └── sound
+│       └── UnoSoundService.java
+│
+├── command
+│   └── UnoCommand.java
+│
+└── listener
+    ├── InventoryListener.java
+    ├── PlayerInteractionListener.java
+    ├── PlayerConnectionListener.java
+    └── EntityInteractionListener.java
+```
+
+---
+
+# 15. Card 数据模型
+
+不要只使用：
+
+```java
+CardFace
+```
+
+因为牌库里会存在两张：
+
+```text
+Red 7
+```
+
+每张牌必须有自己的 Instance ID。
+
+例如：
+
+```java
+record CardInstance(
+    long id,
+    CardFace face
+) {}
+```
+
+其中：
+
+```java
+record CardFace(
+    CardColor color,
+    CardType type,
+    int number
+) {}
+```
+
+这样：
+
+```text
+Red 7 #41
+Red 7 #42
+```
+
+是不同的物理牌。
+
+非常重要。
+
+否则 GUI 点击、抽牌动画、重连同步很容易出现重复卡混乱。
+
+---
+
+# 16. Match State Machine
+
+不要靠大量 boolean 维护。
+
+设计明确状态机：
+
+```text
+LOBBY
+
+↓ start
+
+STARTING
+
+↓
+DEALING
+
+↓
+INITIAL_DISCARD
+
+↓
+TURN_START
+
+↓
+AWAITING_ACTION
+
+├─ play number/action
+│     ↓
+│   RESOLVING_ACTION
+│
+├─ Wild
+│     ↓
+│   AWAITING_COLOR
+│
+├─ Wild +4
+│     ↓
+│   AWAITING_COLOR
+│     ↓
+│   WILD4_CHALLENGE
+│
+└─ draw
+      ↓
+   POST_DRAW_DECISION
+
+↓
+TURN_END
+
+↓
+TURN_START
+
+...
+
+ROUND_END
+
+↓
+
+MATCH_END
+```
+
+所有用户输入都必须验证：
+
+```text
+当前 MatchState
+当前 Player
+当前 TurnState
+```
+
+非法状态输入直接忽略。
+
+---
+
+# 17. 服务端是唯一真相来源
+
+客户端 ItemStack：
+
+```text
+永远不能作为牌状态本身
+```
+
+不要：
+
+```java
+读取物品名称 → 判断玩家出了什么牌
+```
+
+正确方式：
+
+```java
+GUI slot
+    ↓
+GuiSession
+    ↓
+cardInstanceId
+    ↓
+UnoMatch.hand
+```
+
+所有状态以：
+
+```java
+UnoMatch
+```
+
+里的服务器数据为准。
+
+这是防刷牌、防假 ItemStack、防 inventory exploit 的核心。
+
+---
+
+# 18. Revision 防止 GUI 旧状态
+
+给 Match 加：
+
+```java
+long revision;
+```
+
+每次：
+
+```text
+摸牌
+出牌
+换方向
+换颜色
+跳过
+回合推进
+```
+
+都：
+
+```java
+revision++;
+```
+
+打开 GUI 时记录：
+
+```java
+menuRevision
+```
+
+点击时检查：
+
+```java
+menuRevision == match.revision
+```
+
+不一致：
+
+```text
+取消此次点击
+刷新 GUI
+```
+
+这样可以消灭大量：
+
+```text
+重复点击
+高延迟
+旧 GUI
+双击
+```
+
+造成的问题。
+
+---
+
+# 19. UI 总体设计
+
+采用两层 UI：
+
+```text
+世界内 3D 桌面
++
+个人 Hand GUI
+```
+
+这是整个项目的关键设计。
+
+不要把所有东西塞进 Inventory GUI。
+
+---
+
+# 20. 3D UNO 桌面
+
+中心区域：
+
+```text
+┌───────────────────┐
+│                   │
+│   DRAW   DISCARD  │
+│                   │
+│    ACTIVE COLOR   │
+│                   │
+└───────────────────┘
+```
+
+周围最多：
+
+```text
+8 个 Seat
+```
+
+使用：
+
+```text
+ItemDisplay
+TextDisplay
+BlockDisplay
+Interaction
+```
+
+Display Entity 本身非常适合此用途，而且支持 transformation 和客户端插值动画。
+
+---
+
+# 21. Table Entity
+
+推荐定义：
+
+```text
+TableAnchor
+
+DrawPileDisplay
+DiscardPileDisplay
+
+ActiveColorDisplay
+
+DirectionDisplay
+
+SeatDisplay × N
+
+PlayerNameDisplay × N
+
+HandBackDisplay × N
+
+CardCountDisplay × N
+
+Interaction_DrawPile
+
+Interaction_Table
+```
+
+不要让 Display Entity 自己承担点击。
+
+因为 Display 没有正常 hitbox。
+
+在牌堆上覆盖：
+
+```text
+Interaction Entity
+```
+
+Paper 26.2 提供可配置宽高的 Interaction Entity。
+
+---
+
+# 22. 座位布局
+
+桌子 Anchor：
+
+```text
+tableCenter
+```
+
+座位沿椭圆排列。
+
+例如：
+
+```text
+X radius = 4.6
+Z radius = 3.5
+```
+
+对于 N 玩家：
+
+```text
+angle = 2π * i / N
+```
+
+朝向：
+
+```text
+lookAt(tableCenter)
+```
+
+因此：
+
+```text
+2人 → 对坐
+3人 → 三角
+4人 → 四边
+...
+8人 → 均匀环形
+```
+
+视觉上比固定 8 个空位置更自然。
+
+---
+
+# 23. 玩家牌背
+
+其他玩家不能看到真实手牌。
+
+桌上只显示：
+
+```text
+UNO card back
+```
+
+建议：
+
+```text
+1~5张：
+显示对应数量的小扇形牌背
+
+>5：
+显示5张牌背
++
+TextDisplay:
+×12
+```
+
+避免一个 30 张牌的玩家产生 30 个 Display Entity。
+
+---
+
+# 24. 手牌 UI
+
+右键桌面：
+
+```text
+打开 HandMenu
+```
+
+或者：
+
+```text
+/uno hand
+```
+
+打开 6 行 Inventory。
+
+推荐：
+
+```text
+Row 1-5
+玩家手牌
+
+Row 6
+控制按钮
+```
+
+示意：
+
+```text
+┌─────────────────────────────────────┐
+│ R2 R4 R7 B7 G1 Y9 +2 ...            │
+│ ...                                 │
+│ ...                                 │
+│                                     │
+│                                     │
+├─────────────────────────────────────┤
+│ Sort │ Prev │ UNO │ DRAW │ Next │ X │
+└─────────────────────────────────────┘
+```
+
+最多：
+
+```text
+45 张/页
+```
+
+超过后分页。
+
+---
+
+# 25. 可出牌提示
+
+轮到自己时：
+
+合法牌：
+
+```text
+正常亮度
+```
+
+非法牌：
+
+```text
+灰暗
+```
+
+或者使用资源包：
+
+```text
+card/red_7
+card/red_7_disabled
+```
+
+Hover Lore：
+
+```text
+红色 7
+
+✔ 可以打出
+```
+
+或：
+
+```text
+蓝色 3
+
+✘ 当前颜色：红色
+✘ 数字：7
+```
+
+---
+
+# 26. 资源包设计
+
+推荐使用资源包实现真正像牌的视觉。
+
+最少包含：
+
+```text
+52 个颜色牌面
+
+red_0 ... red_9
+red_skip
+red_reverse
+red_draw2
+
+yellow_*
+green_*
+blue_*
+
+wild
+wild_draw4
+
+card_back
+```
+
+一共：
+
+```text
+55 个基础模型/贴图
+```
+
+重复卡牌共用模型。
+
+---
+
+# 27. Item Model
+
+Paper 26.2 Data Component API 可以直接设置：
+
+```text
+minecraft:item_model
+```
+
+Paper 暴露为：
+
+```java
+DataComponentTypes.ITEM_MODEL
+```
+
+例如概念上：
+
+```java
+cardItem.setData(
+    DataComponentTypes.ITEM_MODEL,
+    Key.key("mineuno", "card/red_7")
+);
+```
+
+因此所有卡牌可以使用：
+
+```text
+Material.PAPER
+```
+
+但视觉模型完全不同。
+
+这样同一个 CardRenderer 可以同时用于：
+
+```text
+Inventory GUI
+
+ItemDisplay
+
+动画
+```
+
+---
+
+# 28. 不建议直接复制官方 UNO 美术素材
+
+如果只是私人服务器问题不大。
+
+如果以后准备：
+
+```text
+公开发布插件
+Hangar
+Modrinth
+商业服务器
+```
+
+建议使用：
+
+```text
+原创四色牌面
+原创 Logo
+原创卡背
+```
+
+规则可以实现，但不要直接打包 Mattel 官方牌面图、Logo 等素材。
+
+项目名称也可以最终换成：
+
+```text
+MineCards
+BlockUNO-like Game
+Color Clash
+```
+
+代码层暂时使用 MineUNO 没问题。
+
+---
+
+# 29. 发牌动画
+
+开始游戏时不要瞬间出现手牌。
+
+实现：
+
+```text
+7 rounds
+```
+
+每轮：
+
+```text
+向每名玩家发 1 张牌
+```
+
+动画：
+
+```text
+牌堆
+ ↓
+临时 CardBack ItemDisplay
+ ↓
+玩家 Seat
+ ↓
+消失
+ ↓
+handCount +1
+```
+
+8 人时每轮可并发：
+
+```text
+8 张
+```
+
+7 轮。
+
+总动画控制在几秒。
+
+不要一张一张持续几十秒。
+
+---
+
+# 30. 出牌动画
+
+玩家点击：
+
+```text
+Red Reverse
+```
+
+逻辑状态立即锁定。
+
+然后播放：
+
+```text
+Seat
+ ↓
+Card ItemDisplay
+ ↓
+平移 + 旋转
+ ↓
+Discard Pile
+```
+
+利用 Display Entity：
+
+```text
+interpolation duration
+teleport duration
+transformation
+```
+
+让客户端自行插值。
+
+不要每 tick 手动 teleport。
+
+Paper 的 Display API 原生支持这种插值。
+
+---
+
+# 31. 摸牌动画
+
+其他玩家只能看到：
+
+```text
+card_back
+```
+
+从：
+
+```text
+Draw Pile
+→
+目标玩家
+```
+
+移动。
+
+绝对不能向其他玩家显示真实牌面。
+
+摸牌玩家真正看到的牌：
+
+```text
+在 HandMenu 内出现
+```
+
+---
+
+# 32. 特殊牌效果
+
+不要过度使用粒子。
+
+保持干净。
+
+## Skip
+
+中央：
+
+```text
+⊘
+```
+
+闪一次。
+
+声音：
+
+```text
+短促 click / bass
+```
+
+---
+
+## Reverse
+
+中央 DirectionDisplay：
+
+```text
+↻
+```
+
+旋转 180°。
+
+---
+
+## Draw Two
+
+两张 card back 快速飞向目标玩家。
+
+---
+
+## Wild
+
+弃牌区外围出现四色光圈。
+
+颜色 Picker 出现。
+
+选：
+
+```text
+RED
+```
+
+后：
+
+```text
+四色
+→
+红色
+```
+
+---
+
+## Wild +4
+
+四色脉冲。
+
+然后：
+
+```text
++4
+```
+
+TextDisplay 短暂弹出。
+
+---
+
+## UNO
+
+玩家成功喊 UNO：
+
+玩家座位上方：
+
+```text
+UNO!
+```
+
+放大弹出约 1 秒。
+
+配一个独立音效。
+
+---
+
+# 33. HUD
+
+## BossBar
+
+只给参与当前 Match 的玩家。
+
+显示：
+
+```text
+Alice 的回合 · RED · 23s
+```
+
+BossBar progress：
+
+```text
+remainingTime / turnTime
+```
+
+颜色尽量对应：
+
+```text
+RED
+YELLOW
+GREEN
+BLUE
+```
+
+Adventure 原生提供 BossBar 支持。
+
+---
+
+## ActionBar
+
+玩家自己的回合：
+
+```text
+轮到你 · 选择一张牌，或点击牌堆摸牌
+```
+
+别人回合：
+
+```text
+Bob 的回合 · 5 张牌 · ↻
+```
+
+Wild +4：
+
+```text
+Alice 对你使用了 +4 · 接受或质疑
+```
+
+---
+
+# 34. 不建议默认占用 Scoreboard
+
+很多生存服务器已有：
+
+```text
+TAB
+计分板
+经济插件
+领地插件
+```
+
+UNO 强行设置 Sidebar 很容易冲突。
+
+因此：
+
+```yaml
+ui:
+  scoreboard: false
+```
+
+默认关闭。
+
+核心信息由：
+
+```text
+3D TextDisplay
+BossBar
+ActionBar
+```
+
+表达。
+
+---
+
+# 35. Adventure
+
+所有文字统一使用：
+
+```text
+Adventure Components
+MiniMessage
+```
+
+禁止：
+
+```java
+"§cXXX"
+```
+
+Paper 26.2 已升级到 Adventure 5，并移除部分旧 deprecated API，因此 Agent 应直接按 Adventure 5 写。
+
+---
+
+# 36. Lobby 系统
+
+命令：
+
+```text
+/uno
+```
+
+打开大厅 GUI。
+
+显示所有桌：
+
+```text
+Table #1
+3 / 8
+Waiting
+
+Table #2
+6 / 8
+Playing
+```
+
+---
+
+# 37. 创建房间
+
+```text
+/uno create
+```
+
+或者 GUI：
+
+```text
+[创建房间]
+```
+
+房主可设置：
+
+```text
+人数上限
+Quick / Classic 500
+Turn Time
+房规
+是否允许观战
+```
+
+---
+
+# 38. Ready
+
+Lobby：
+
+```text
+Alice   ✔
+Bob     ✔
+Carol   ✘
+```
+
+只有：
+
+```text
+>= 2 玩家
+
+且
+
+全部 Ready
+```
+
+时房主可以开始。
+
+也可以：
+
+```yaml
+lobby:
+  require-ready: true
+```
+
+---
+
+# 39. 房主离开
+
+不要直接销毁。
+
+按加入时间寻找下一位：
+
+```text
+Host migration
+```
+
+只有 Lobby 为空才销毁。
+
+---
+
+# 40. 推荐命令
+
+```text
+/uno
+/uno create
+/uno join <id>
+/uno leave
+/uno start
+/uno ready
+
+/uno hand
+/uno draw
+/uno uno
+/uno catch
+
+/uno spectate <id>
+```
+
+Admin：
+
+```text
+/uno admin arena create <name>
+/uno admin arena setcenter <name>
+/uno admin arena delete <name>
+
+/uno admin reload
+```
+
+---
+
+# 41. Arena
+
+一个 Arena 保存：
+
+```yaml
+arena:
+  world: world
+  center:
+    x: 100.5
+    y: 65.0
+    z: -30.5
+    yaw: 0
+```
+
+所有：
+
+```text
+座椅
+桌面
+牌堆
+```
+
+都相对于 center 计算。
+
+不要把几十个 entity UUID 永久写死在 config。
+
+启动 Match 时生成。
+
+结束 Match 时全部 remove。
+
+---
+
+# 42. Display Entity 生命周期
+
+所有桌面实体：
+
+```java
+setPersistent(false);
+```
+
+Match 结束：
+
+```java
+entity.remove();
+```
+
+Plugin disable：
+
+```text
+清理全部 TableEntityRegistry
+```
+
+Paper 文档也特别提醒临时 Display Entity 应正确移除，避免在持续加载区形成实体泄漏。
+
+---
+
+# 43. 每桌实体预算
+
+目标：
+
+```text
+Persistent Display Entities < 70 / table
+```
+
+例如：
+
+```text
+桌面                  1
+牌堆                  5
+中心 UI               5
+
+8 玩家：
+Name                   8
+CardCount              8
+HandBack            <=40
+
+其他                   ~5
+```
+
+Transient 动画实体：
+
+```text
+通常 < 10
+发牌瞬间 <= 16
+```
+
+不应该创建几百个实体。
+
+---
+
+# 44. Scheduler 原则
+
+禁止：
+
+```text
+每 tick
+遍历服务器所有玩家
+遍历所有世界实体
+```
+
+每个 Match 只管理自己的：
+
+```text
+players
+entities
+tasks
+```
+
+BossBar 时间：
+
+```text
+每 5 ticks 更新一次
+```
+
+动画尽量使用 Display interpolation。
+
+这样即使多个 UNO 桌同时运行也很轻。
+
+---
+
+# 45. 回合计时
+
+默认：
+
+```yaml
+turn-time-seconds: 30
+```
+
+10 秒：
+
+```text
+声音提示
+```
+
+5 秒：
+
+```text
+BossBar flashing
+```
+
+超时：
+
+普通回合：
+
+```text
+自动摸 1
+自动结束
+```
+
+不要自动帮玩家出牌。
+
+Wild Color 超时：
+
+```text
+自动选择玩家当前手牌中数量最多的颜色
+```
+
+Challenge 超时：
+
+```text
+自动接受 +4
+```
+
+---
+
+# 46. 断线
+
+玩家 Quit：
+
+不要立即删除。
+
+状态：
+
+```java
+DISCONNECTED
+```
+
+保留：
+
+```text
+seat
+hand
+score
+turn position
+```
+
+默认：
+
+```yaml
+reconnect-grace-seconds: 60
+```
+
+60 秒内回来：
+
+```text
+重新连接 Match
+恢复 Seat
+恢复 HUD
+```
+
+---
+
+# 47. 玩家断线期间轮到他
+
+仍使用正常：
+
+```text
+turn timeout
+```
+
+超时：
+
+```text
+摸 1
+结束回合
+```
+
+不能让整个牌局永久卡住。
+
+---
+
+# 48. 超过重连期限
+
+玩家：
+
+```text
+FORFEIT
+```
+
+从 turn order 移除。
+
+其手牌：
+
+```text
+加入 Draw Pile
+重新 shuffle
+```
+
+如果只剩一名玩家：
+
+```text
+该玩家获胜
+```
+
+---
+
+# 49. 牌库耗尽
+
+必须处理。
+
+当 Draw Pile 空：
+
+保留：
+
+```text
+Discard Pile 最顶部
+```
+
+其余弃牌：
+
+```text
+shuffle
+→
+新的 Draw Pile
+```
+
+要求永远维持：
+
+```text
+所有 CardInstance 数量总和 = 108
+```
+
+这是重要 invariant。
+
+---
+
+# 50. 游戏核心 Invariants
+
+开发期间提供：
+
+```java
+assertGameIntegrity()
+```
+
+Debug 模式每次 Action 后检查：
+
+```text
+所有牌 ID 唯一
+
+draw pile
++
+discard pile
++
+所有 hand
+=
+108
+
+currentPlayer 存在于 active players
+
+activeColor != null
+
+任何 CardInstance 只存在一个位置
+```
+
+这能非常有效地抓到 UNO 插件最难调的重复牌 BUG。
+
+---
+
+# 51. 手牌排序
+
+排序只改变 UI。
+
+绝不能改变物理：
+
+```text
+Hand internal order
+```
+
+建议 GUI 支持：
+
+```text
+COLOR
+NUMBER
+TYPE
+DRAW_ORDER
+```
+
+按钮：
+
+```text
+[排序：颜色]
+```
+
+---
+
+# 52. Resource Pack 状态
+
+进入 UNO Lobby 时检查。
+
+状态：
+
+```text
+UNKNOWN
+DOWNLOADING
+LOADED
+DECLINED
+FAILED
+```
+
+推荐配置：
+
+```yaml
+resource-pack:
+  required: true
+```
+
+如果拒绝：
+
+```text
+无法加入高质量 UNO 游戏
+```
+
+管理员也可：
+
+```yaml
+required: false
+```
+
+此时使用 vanilla fallback。
+
+---
+
+# 53. Fallback 模式
+
+没有 Resource Pack 时：
+
+用 Minecraft 物品区分：
+
+```text
+RED    → RED_DYE
+YELLOW → YELLOW_DYE
+GREEN  → LIME_DYE
+BLUE   → BLUE_DYE
+
+Wild → NETHER_STAR
+```
+
+Item Name：
+
+```text
+Red 7
+Blue Reverse
+Wild +4
+```
+
+这样资源包下载失败也不会导致插件崩溃。
+
+---
+
+# 54. House Rule 架构
+
+不要将房规写死进 RuleEngine。
+
+设计：
+
+```java
+RuleSet
+```
+
+例如：
+
+```java
+record RuleSet(
+    boolean stacking,
+    boolean sevenZero,
+    boolean jumpIn,
+    boolean forcePlay,
+    boolean challengeWild4
+) {}
+```
+
+---
+
+# 55. V1 默认房规
+
+```text
+Stacking     OFF
+Seven-Zero   OFF
+Jump-In      OFF
+
+Wild4 Challenge ON
+```
+
+默认严格经典玩法。
+
+---
+
+# 56. V1.1 可扩展
+
+### Stacking
+
+例如：
+
+```text
++2
+→ +2
+→ +2
+
+下一玩家摸6
+```
+
+不要默认开启。
+
+---
+
+### 7-0
+
+```text
+7 → 与指定玩家交换手牌
+
+0 → 所有人按当前方向交换手牌
+```
+
+---
+
+### Jump-In
+
+如果有人拥有：
+
+```text
+完全相同颜色
++
+完全相同数字/功能
+```
+
+则允许不在自己回合时抢出。
+
+这会显著改变状态机，所以建议核心完成以后再做。
+
+官方也存在 Jump-In / 7-0 等变体说明，但它们不属于默认经典规则。
+
+---
+
+# 57. 游戏事件系统
+
+建议自己定义：
+
+```java
+interface GameEvent {}
+```
+
+例如：
+
+```text
+CardPlayedEvent
+CardDrawnEvent
+TurnChangedEvent
+DirectionChangedEvent
+ColorChangedEvent
+
+UnoCalledEvent
+UnoCaughtEvent
+
+Wild4ChallengeStartedEvent
+Wild4ChallengeResolvedEvent
+
+PlayerJoinedMatchEvent
+PlayerForfeitEvent
+
+RoundEndedEvent
+```
+
+RuleEngine：
+
+```text
+产生 GameEvent
+```
+
+Presentation：
+
+```text
+监听 GameEvent
+↓
+更新 Display
+↓
+播放 Animation
+↓
+Sound
+↓
+HUD
+```
+
+这样规则层完全不知道：
+
+```text
+Minecraft entity
+Inventory
+Particle
+```
+
+长期维护会简单很多。
+
+---
+
+# 58. Action API
+
+建议所有玩家输入最终转换为：
+
+```java
+sealed interface PlayerAction
+```
+
+包含：
+
+```java
+PlayCard
+DrawCard
+PassAfterDraw
+
+ChooseColor
+
+AcceptWild4
+ChallengeWild4
+
+CallUno
+CatchUno
+
+LeaveMatch
+```
+
+然后统一：
+
+```java
+ActionResult RuleEngine.apply(
+    UnoMatch match,
+    UUID player,
+    PlayerAction action
+);
+```
+
+不要让 InventoryListener 直接修改游戏数据。
+
+---
+
+# 59. 并发原则
+
+所有：
+
+```text
+Match mutation
+Bukkit entity
+Inventory
+Display
+```
+
+在 Server Main Thread。
+
+Async 只允许：
+
+```text
+数据库
+配置 IO
+统计保存
+```
+
+Async callback 回来以后：
+
+```text
+schedule back to main thread
+```
+
+再修改 Match。
+
+---
+
+# 60. 多桌支持
+
+MatchManager：
+
+```java
+Map<UUID, UnoMatch> matches;
+Map<UUID, UUID> playerToMatch;
+```
+
+必须保证：
+
+```text
+一个玩家同时只能参加一个 Match
+```
+
+但：
+
+```text
+server 可以同时存在多个 Match
+```
+
+从第一版架构就支持，不要做成一个全局 singleton game。
+
+---
+
+# 61. 观战
+
+```text
+/uno spectate
+```
+
+观众可以：
+
+```text
+看到桌面
+看到玩家数量
+看到公开打出的牌
+看到动画
+```
+
+不能：
+
+```text
+打开玩家手牌
+质疑
+Catch UNO
+操作牌堆
+```
+
+可选：
+
+```text
+Spectator seat
+```
+
+---
+
+# 62. 声音
+
+优先使用：
+
+```text
+Adventure Sound
+```
+
+Adventure 支持 vanilla 或 Resource Pack 自定义 sound key。
+
+推荐资源包：
+
+```text
+mineuno:card.draw
+mineuno:card.play
+mineuno:card.reverse
+mineuno:card.skip
+mineuno:uno
+mineuno:win
+```
+
+声音必须短。
+
+不要持续背景音乐。
+
+---
+
+# 63. 配置文件
+
+推荐：
+
+```yaml
+game:
+  min-players: 2
+  max-players: 8
+
+  starting-cards: 7
+
+  turn-time-seconds: 30
+  challenge-time-seconds: 8
+  reconnect-grace-seconds: 60
+
+  default-mode: QUICK
+
+rules:
+  wild4-challenge: true
+
+  stacking: false
+  seven-zero: false
+  jump-in: false
+
+visual:
+  animations: true
+  particles: true
+  sounds: true
+
+  hand-back-max-rendered: 5
+
+ui:
+  bossbar: true
+  actionbar: true
+  scoreboard: false
+
+resource-pack:
+  required: true
+```
+
+---
+
+# 64. 多语言
+
+不要在 Java 中硬编码大量文字。
+
+至少：
+
+```text
+lang/zh_CN.yml
+lang/en_US.yml
+```
+
+例如：
+
+```yaml
+game:
+  your-turn: "<yellow>轮到你了"
+  player-turn: "<gray>正在等待 <white>{player}</white>"
+  draw-two: "<red>{player}</red> 摸了 2 张牌"
+
+uno:
+  called: "<gold>{player}</gold> 喊出了 <red><bold>UNO!</bold>"
+  caught: "<red>{player}</red> 忘记喊 UNO，被抓到了！"
+```
+
+使用 MiniMessage。
+
+---
+
+# 65. 数据持久化
+
+V1 需要持久化：
+
+```text
+Arena
+统计信息
+玩家胜场
+玩家游戏场次
+```
+
+Active Match 不建议跨服务器重启恢复。
+
+服务器关闭：
+
+```text
+Match cancelled
+```
+
+因为完整恢复：
+
+```text
+Display entities
+seat
+animation state
+turn timer
+connection state
+```
+
+复杂度很高，收益有限。
+
+---
+
+# 66. 玩家统计
+
+可以保存：
+
+```text
+gamesPlayed
+gamesWon
+
+cardsPlayed
+cardsDrawn
+
+wild4Played
+wild4Challenges
+wild4ChallengeSuccess
+
+unoCalls
+unoCatches
+timesCaught
+
+fastestWin
+```
+
+第一版使用：
+
+```text
+SQLite
+```
+
+即可。
+
+异步 IO。
+
+---
+
+# 67. 安全与异常处理
+
+必须覆盖：
+
+```text
+玩家死亡
+玩家传送
+玩家换世界
+玩家退出
+
+InventoryClose
+InventoryDrag
+Shift Click
+
+Double Click
+Number Key
+Offhand swap
+
+实体被其他插件清理
+Chunk unload
+
+Plugin reload
+Server shutdown
+```
+
+Hand GUI 中：
+
+```text
+InventoryClickEvent
+InventoryDragEvent
+```
+
+均严格取消默认物品移动行为。
+
+---
+
+# 68. 不修改玩家真实 Inventory
+
+强烈建议：
+
+> UNO 不要占用玩家真实背包。
+
+不要：
+
+```text
+清空背包
+把 UNO 牌放进 hotbar
+游戏结束恢复
+```
+
+这种做法极容易：
+
+```text
+复制物品
+丢物品
+崩服后无法恢复
+与其他插件冲突
+```
+
+所有 UNO 手牌只存在于：
+
+```text
+UnoMatch
++
+虚拟 Inventory GUI
+```
+
+这会安全很多。
+
+---
+
+# 69. 玩家座位
+
+可以将玩家传送至 Seat。
+
+V1 不一定真的强制“坐下”。
+
+推荐：
+
+```text
+固定位置
+限制离开桌子一定范围
+```
+
+而不是大量依赖：
+
+```text
+ArmorStand passenger
+```
+
+如果想强化桌游感，可以后续增加 Seat Entity。
+
+核心游戏不能依赖玩家真的处于骑乘状态。
+
+---
+
+# 70. 玩家隐私
+
+最重要的规则：
+
+服务器任何公开 UI 都不能泄露：
+
+```text
+别人摸到的牌
+别人手牌内容
+别人是否持有某种颜色
+```
+
+唯一例外：
+
+```text
+Wild +4 Challenge Reveal
+```
+
+且只发送给：
+
+```text
+challenger
+```
+
+不能发送给所有 Match 玩家。
+
+---
+
+# 71. 测试结构
+
+Rule Engine 必须可以脱离 Paper 启动。
+
+使用：
+
+```text
+JUnit 5
+```
+
+测试。
+
+---
+
+# 72. 必须测试的规则
+
+至少编写：
+
+```text
+Deck contains exactly 108 cards
+
+Every player receives 7 cards
+
+Color match
+
+Number match
+
+Action match
+
+Wild always playable
+
+Wild4 legal case
+
+Wild4 illegal case
+
+Wild4 successful challenge
+
+Wild4 failed challenge
+
+Draw2 skips next
+
+Skip skips next
+
+Reverse changes direction
+
+Reverse in 2-player game
+
+Draw only once
+
+Drawn card can be played
+
+Cannot play another hand card after drawing
+
+UNO successful call
+
+UNO catch
+
+UNO catch expires after next action
+
+Draw pile reshuffle
+
+Last card Draw2
+
+Last card Wild4
+
+Player disconnect
+
+Player forfeit
+
+Only one copy of every CardInstance exists
+```
+
+---
+
+# 73. Property / Invariant Test
+
+建议随机执行：
+
+```text
+10,000 个合法游戏 Action
+```
+
+每一步检查：
+
+```text
+总牌数 = 108
+
+无重复 CardInstance ID
+
+current player 有效
+
+游戏不会进入无法继续的状态
+```
+
+这是寻找边缘 BUG 的高性价比方法。
+
+---
+
+# 74. Agent 实现顺序
+
+不要先做视觉。
+
+严格分阶段。
+
+### Phase 1 — Pure Game Engine
+
+实现：
+
+```text
+Card
+Deck
+Hand
+RuleEngine
+TurnManager
+Wild
+Wild4 Challenge
+UNO
+Win
+Score
+```
+
+达到：
+
+```text
+JUnit 全通过
+```
+
+---
+
+### Phase 2 — Paper Match
+
+实现：
+
+```text
+Plugin bootstrap
+commands
+Lobby
+MatchManager
+player join/leave
+```
+
+先使用 Chat 输出测试。
+
+---
+
+### Phase 3 — Hand GUI
+
+实现：
+
+```text
+HandMenu
+ColorPicker
+Challenge
+UNO
+Catch
+```
+
+达到完整可玩。
+
+---
+
+### Phase 4 — 3D Table
+
+实现：
+
+```text
+TableRenderer
+SeatRenderer
+PileRenderer
+TextDisplay
+Interaction
+```
+
+---
+
+### Phase 5 — Animation
+
+实现：
+
+```text
+deal
+draw
+play
+reverse
+skip
+wild
+UNO
+win
+```
+
+---
+
+### Phase 6 — Resource Pack
+
+加入：
+
+```text
+card models
+card back
+table
+icons
+sounds
+```
+
+---
+
+### Phase 7 — Robustness
+
+最后处理：
+
+```text
+disconnect
+reconnect
+forfeit
+spectator
+multiple matches
+reload
+performance
+```
+
+---
+
+# 75. 第一版完成标准
+
+最终 V1 必须达到：
+
+## Gameplay
+
+```text
+2~8 玩家均正常
+
+完整108张牌
+
+Draw2
+Skip
+Reverse
+Wild
+Wild4
+Wild4 Challenge
+
+UNO Call
+UNO Catch
+
+摸牌
+弃牌重洗
+
+Quick Mode
+Classic 500
+```
+
+## UI
+
+```text
+Lobby GUI
+Hand GUI
+Color GUI
+Challenge GUI
+
+BossBar
+ActionBar
+3D桌面
+玩家牌数
+方向
+当前颜色
+```
+
+## Visual
+
+```text
+实体牌堆
+发牌动画
+摸牌动画
+出牌动画
+Reverse动画
+Wild颜色动画
+UNO动画
+胜利动画
+```
+
+## Robustness
+
+```text
+断线重连
+超时
+主动退出
+多桌
+观战
+牌库耗尽
+服务器关闭清理
+```
+
+## Architecture
+
+```text
+RuleEngine 与 Bukkit UI 解耦
+
+无 NMS
+无客户端 Mod
+无 ProtocolLib 强依赖
+
+Java 25
+Paper 26.2 API
+
+Resource Pack 可独立替换
+```
+
+---
+
+# 76. 最终体验示例
+
+玩家执行：
+
+```text
+/uno
+```
+
+看到大厅。
+
+选择：
+
+```text
+创建游戏
+```
+
+Bob、Carol 加入。
+
+全部 Ready。
+
+点击：
+
+```text
+开始
+```
+
+玩家被送到 UNO 桌旁。
+
+中央牌堆开始发牌：
+
+```text
+啪
+啪
+啪
+```
+
+7 轮后：
+
+```text
+中央翻牌：
+
+RED 7
+```
+
+Alice 的 BossBar：
+
+```text
+你的回合 · RED · 30s
+```
+
+Alice 右键桌面打开手牌：
+
+```text
+R3 R9 B7 G2 WILD Y+2 BSKIP
+```
+
+点击：
+
+```text
+B7
+```
+
+一张蓝 7 从 Alice 的位置飞向桌子中心。
+
+桌面光圈：
+
+```text
+RED
+→
+BLUE
+```
+
+轮到 Bob。
+
+Bob 打：
+
+```text
+Wild +4
+```
+
+选：
+
+```text
+GREEN
+```
+
+Carol 屏幕：
+
+```text
+Bob 对你使用了 +4
+
+[接受 +4]      [质疑]
+```
+
+Carol 点击：
+
+```text
+质疑
+```
+
+服务器检查 Bob 出牌前手牌。
+
+发现：
+
+```text
+Bob 当时拥有 Blue 2
+当前颜色原本为 Blue
+```
+
+所以 Bob 非法。
+
+桌面中央：
+
+```text
+CHALLENGE SUCCESS!
+```
+
+4 张牌背飞向 Bob。
+
+Carol 正常开始自己的回合。
+
+之后 Alice 打到：
+
+```text
+1 张牌
+```
+
+但没有喊 UNO。
+
+所有其他玩家出现：
+
+```text
+⚠ Alice 忘记 UNO！
+```
+
+Bob 先点击：
+
+```text
+抓 UNO
+```
+
+两张牌飞向 Alice。
+
+最后 Carol 打完最后一张牌。
+
+桌面：
+
+```text
+══════════════
+   CAROL WINS
+══════════════
+```
+
+伴随纸牌飞散、声音和排行榜。
+
+这应该是整个插件最终需要达到的体验。

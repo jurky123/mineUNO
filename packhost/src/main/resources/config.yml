@@ -1,0 +1,13 @@
+# PackHost 配置
+# 把任意数量的资源包 zip 放进 plugins/PackHost/packs/ 即可，会按文件名顺序合并成一个大包。
+# 也可以把散装文件放进 plugins/PackHost/pack/（assets/... 目录结构），散装文件优先级最低。
+
+port: 8123
+# 公网地址（客户端从这个地址下载材质包）。留空则自动探测本机 IP。
+public-address: ""
+# true = 拒绝材质包的客户端会被踢出；false = 只提示
+required: false
+# 玩家进服时自动下发
+send-on-join: true
+# 下载提示
+prompt: "<gold>服务器材质包</gold> <gray>用于显示自定义物品外观，建议接受"
