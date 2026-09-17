@@ -38,6 +38,14 @@ hand:
   tilt: -30      # 手牌后仰角度
   yaw-offset: 0  # 手牌朝向偏移      # 手牌后仰角度（低头看牌用负数）
 
+pile:
+  show: 12        # 弃牌堆显示最近多少张
+  spread: 0.35    # 散布半径（方块）
+  angle: 20       # 随机角度范围（度）
+
+turn:
+  title: true     # 回合/跳过是否弹标题提示
+
 visual:
   animations: true
   particles: true

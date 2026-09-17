@@ -12,6 +12,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Sound;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.entity.Player;
@@ -561,6 +562,14 @@ public class MatchManager {
             @Override
             public void onSkip(UUID target) {
                 tableOf(g).onSkip(target);
+                Player p = Bukkit.getPlayer(target);
+                if (p != null) {
+                    p.playSound(p.getLocation(), Sound.BLOCK_ANVIL_LAND, 0.7f, 1.4f);
+                    if (plugin.cfg("turn.title", true)) {
+                        p.showTitle(Title.title(MineUnoPlugin.mm("<red><bold>你被跳过"),
+                                MineUnoPlugin.mm("<gray>本轮失去出牌机会"), 3, 22, 8));
+                    }
+                }
             }
 
             @Override
@@ -579,7 +588,15 @@ public class MatchManager {
             @Override
             public void onTurn(UUID player) {
                 tableOf(g).onTurn(player);
-                plugin.menus().refresh(Bukkit.getPlayer(player));
+                Player p = Bukkit.getPlayer(player);
+                if (p != null) {
+                    p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.8f, 1.5f);
+                    if (plugin.cfg("turn.title", true)) {
+                        p.showTitle(Title.title(MineUnoPlugin.mm("<gold><bold>▶ 你的回合"),
+                                MineUnoPlugin.mm("<white>准星选牌 · 左键出牌 · 右键摸牌"), 5, 25, 8));
+                    }
+                }
+                plugin.menus().refresh(p);
             }
 
             @Override

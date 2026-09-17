@@ -45,7 +45,7 @@ public class Table implements Game.Events {
     private final Map<UUID, Seat> seats = new HashMap<>();
     private final Map<UUID, Hand> hands = new HashMap<>();
     private final Map<UUID, ArmorStand> seatsEntities = new HashMap<>();
-    private final List<ItemDisplay> discardUnder = new ArrayList<>();
+    private final List<ItemDisplay> pileDisplays = new ArrayList<>();
     private final List<Entity> temp = new ArrayList<>();
     private final List<BukkitTask> tasks = new ArrayList<>();
 
@@ -55,7 +55,11 @@ public class Table implements Game.Events {
     private Interaction drawHit, handHit;
     private final double lift;
     private double handDistance, handHeight, handSpacing, handScale, handTilt, handYawOffset, handYawSpread;
-    private static final int HAND_MAX = 10;
+    private final int handMax, rowsMax, pileShow;
+    private final double rowGap, rowOffset, pileSpread, pileAngle;
+    private TurnMarker marker;
+    private UUID pendingTurn;
+    private boolean skipAnimating;
     private float dirYaw;
 
     private static class Seat {
@@ -72,7 +76,7 @@ public class Table implements Game.Events {
 
     /** 玩家的 3D 手牌（只对自己可见）。 */
     private static class Hand {
-        final ItemDisplay[] cards = new ItemDisplay[HAND_MAX];
+        ItemDisplay[] cards = new ItemDisplay[0];
         final List<Card> shown = new ArrayList<>();
         int selected = -1;
     }
@@ -96,7 +100,14 @@ public class Table implements Game.Events {
         this.handScale = plugin.cfg("hand.scale", 0.72);
         this.handTilt = plugin.cfg("hand.tilt", -45);
         this.handYawOffset = plugin.cfg("hand.yaw-offset", 0);
-        this.handYawSpread = plugin.cfg("hand.yaw-spread", 7);
+        this.handYawSpread = plugin.cfg("hand.yaw-spread", 15);
+        this.handMax = plugin.cfg("hand.max", 16);
+        this.rowsMax = plugin.cfg("hand.rows-max", 8);
+        this.rowGap = plugin.cfg("hand.row-gap", 0.34);
+        this.rowOffset = plugin.cfg("hand.row-offset", 0.12);
+        this.pileShow = plugin.cfg("pile.show", 12);
+        this.pileSpread = plugin.cfg("pile.spread", 0.35);
+        this.pileAngle = plugin.cfg("pile.angle", 20);
     }
 
     /** 热更新手牌参数（/uno hand 命令用）。 */
@@ -127,6 +138,18 @@ public class Table implements Game.Events {
     private Vector rotateY(Vector vector, double angle) {
         double cos = Math.cos(angle), sin = Math.sin(angle);
         return new Vector(vector.getX() * cos + vector.getZ() * sin, 0, -vector.getX() * sin + vector.getZ() * cos);
+    }
+
+    /** 玩家手牌扇形的圆心（第 0 排）。 */
+    private Location handCenter(Seat s) {
+        Location at = s.stand.clone().add(s.inward.clone().multiply(handDistance)).add(0, handHeight, 0);
+        at.setYaw(0);
+        at.setPitch(0);
+        return at;
+    }
+
+    private Location headLocation(Seat s) {
+        return s.stand.clone().add(0, 2.35, 0);
     }
 
     private Location surface(double dx, double dz) {
@@ -286,7 +309,8 @@ public class Table implements Game.Events {
     private void buildHands() {
         for (Map.Entry<UUID, Seat> e : seats.entrySet()) {
             Hand h = new Hand();
-            for (int i = 0; i < HAND_MAX; i++) {
+            h.cards = new ItemDisplay[handMax];
+            for (int i = 0; i < handMax; i++) {
                 ItemDisplay d = handDisplay(e.getValue().handBase);
                 h.cards[i] = d;
                 makePrivate(d, e.getKey());
@@ -305,10 +329,10 @@ public class Table implements Game.Events {
                 .thenComparingInt(c -> c.type() == Card.Type.NUMBER ? c.number() : 100));
         h.shown.clear();
         h.shown.addAll(cards);
-        int n = Math.min(cards.size(), HAND_MAX);
-        double step = n <= 1 ? 0 : Math.min(handYawSpread, 170.0 / (n - 1));
+        int n = Math.min(cards.size(), handMax);
+        List<HandLayout.Slot> slots = HandLayout.layout(n, rowsMax);
         if (h.selected >= n) h.selected = -1;
-        for (int i = 0; i < HAND_MAX; i++) {
+        for (int i = 0; i < h.cards.length; i++) {
             ItemDisplay d = h.cards[i];
             if (!d.isValid()) continue;
             if (i >= n) {
@@ -317,16 +341,16 @@ public class Table implements Game.Events {
             }
             Card card = cards.get(i);
             boolean selected = i == h.selected;
-            double center = (i - (n - 1) / 2.0);
-            double angle = Math.toRadians(center * step);
-            d.setItemStack(card.item(game.canPlay(player, card)));
-            d.setTransformation(transformHand(handScale,
-                    s.handYaw + (float) handYawOffset + (float) (center * step), (float) handTilt, selected));
-            d.setTeleportDuration(4);
-            Location pivot = s.stand.clone().add(0, handHeight, 0);
-            Location loc = pivot.clone().add(rotateY(s.inward, angle).multiply(handDistance));
+            HandLayout.Slot slot = slots.get(i);
+            double angle = HandLayout.angle(slot.indexInRow(), slot.rowSize(), handYawSpread);
+            Location pivot = s.stand.clone().add(0, handHeight + slot.row() * rowGap, 0);
+            Location loc = pivot.add(rotateY(s.inward, Math.toRadians(angle)).multiply(handDistance + slot.row() * rowOffset));
             loc.setYaw(0);
             loc.setPitch(0);
+            d.setItemStack(card.item(game.canPlay(player, card)));
+            d.setTransformation(transformHand(handScale,
+                    s.handYaw + (float) handYawOffset + (float) angle, (float) handTilt, selected));
+            d.setTeleportDuration(4);
             if (selected) loc.add(s.inward.clone().multiply(-0.24)).add(0, 0.10, 0);
             d.teleport(loc);
         }
@@ -336,7 +360,7 @@ public class Table implements Game.Events {
     public void aim(Player player) {
         Hand h = hands.get(player.getUniqueId());
         if (h == null || h.shown.isEmpty()) return;
-        int n = Math.min(h.shown.size(), HAND_MAX);
+        int n = Math.min(h.shown.size(), h.cards.length);
         Location eye = player.getEyeLocation();
         Vector dir = eye.getDirection();
         int best = -1;
@@ -422,13 +446,17 @@ public class Table implements Game.Events {
         };
     }
 
+    /** 两段弧线飞行：起点 -> 中点抬高 -> 终点。 */
     private void fly(ItemStack item, Location from, Location to, int ticks) {
         if (!animations) return;
         ItemDisplay d = display(item, from, cardScale, 0);
         temp.add(d);
-        d.setTeleportDuration(ticks);
-        schedule(1, () -> d.teleport(to));
-        schedule(ticks + 2, d::remove);
+        Location mid = from.clone().add(to).multiply(0.5).add(0, 0.45, 0);
+        int half = Math.max(1, ticks / 2);
+        d.setTeleportDuration(half);
+        schedule(1, () -> d.teleport(mid));
+        schedule(half + 1, () -> d.teleport(to));
+        schedule(ticks + 3, d::remove);
     }
 
     // ---------- 构建 ----------
@@ -442,8 +470,9 @@ public class Table implements Game.Events {
         drawLabel = text(surface(-1.05, 0).add(0, 0.5, 0), "<white>牌堆", 0.55f);
 
         discardTop = display(Card.back(), surface(1.05, 0), cardScale, 0);
-        for (int i = 0; i < 6; i++) {
-            discardUnder.add(display(Card.back(), discardSpot(), 0.01, 0));
+        discardTop.setTransformation(transform(0.01, 0));
+        for (int i = 0; i < pileShow; i++) {
+            pileDisplays.add(display(Card.back(), discardSpot(), 0.01, 0));
         }
 
         colorDisc = display(Card.icon("color/red", "<white>当前颜色"), surface(0, 0.75), 1.1, 0);
@@ -456,6 +485,7 @@ public class Table implements Game.Events {
         handHit = hitbox(surface(1.15, 0).add(0, 0.35, 0), 3.0f, 1.4f);
         HITS.put(handHit.getUniqueId(), new Hit(this, false));
 
+        marker = new TurnMarker(plugin, world);
         buildSeats();
         buildHands();
         update();
@@ -525,21 +555,20 @@ public class Table implements Game.Events {
     }
 
     private void updateDiscard() {
-        Card top = game.top();
-        if (top != null) discardTop.setItemStack(top.item());
-        int under = Math.min(discardUnder.size(), game.discard.size() - 1);
-        for (int i = 0; i < discardUnder.size(); i++) {
-            ItemDisplay d = discardUnder.get(i);
-            if (i >= under) {
+        int shown = Math.min(pileDisplays.size(), game.discard.size());
+        for (int i = 0; i < pileDisplays.size(); i++) {
+            ItemDisplay d = pileDisplays.get(i);
+            if (i >= shown) {
                 d.setTransformation(transform(0.01, 0));
                 continue;
             }
-            Card card = game.discard.get(game.discard.size() - 2 - i);
+            Card card = game.discard.get(game.discard.size() - 1 - i);
+            PileLayout.Spot spot = PileLayout.spot(card, pileSpread, pileAngle);
             d.setItemStack(card.item());
-            d.setTransformation(transform(cardScale, 7f + i * 19f));
-            Location at = discardSpot().clone().add(Math.sin(i * 1.9) * 0.035, 0.004 * (i + 1), Math.cos(i * 2.4) * 0.035);
-            d.teleport(at);
+            d.setTransformation(transform(cardScale, spot.yaw()));
+            d.teleport(discardSpot().clone().add(spot.dx(), 0.004 + (shown - 1 - i) * 0.004, spot.dz()));
         }
+        discardTop.setTransformation(transform(0.01, 0));
         int layers = Math.min(pile.size(), 1 + game.draw.size() / 10);
         for (int i = 0; i < pile.size(); i++) {
             ItemDisplay d = pile.get(i);
@@ -597,19 +626,28 @@ public class Table implements Game.Events {
     public void onPlay(UUID player, Card card) {
         if (!card.wild()) updateColor();
         Seat s = seats.get(player);
-        if (s != null) {
-            sound(Sound.ITEM_BOOK_PAGE_TURN, discardSpot(), 0.7f, 1.1f);
-            dust(discardSpot(), card.wild() ? game.activeColor : card.color(), 10);
-            if (animations) {
-                discardTop.setItemStack(card.item());
-                discardTop.teleport(s.handBase);
-                discardTop.setTeleportDuration(6);
-                schedule(1, () -> discardTop.teleport(discardSpot()));
-                schedule(9, this::updateDiscard);
-            } else {
+        if (s == null) return;
+        sound(Sound.ITEM_BOOK_PAGE_TURN, discardSpot(), 0.7f, 1.1f);
+        dust(discardSpot(), card.wild() ? game.activeColor : card.color(), 10);
+        if (animations) {
+            PileLayout.Spot spot = PileLayout.spot(card, pileSpread, pileAngle);
+            int shown = Math.min(pileDisplays.size(), game.discard.size());
+            Location to = discardSpot().clone().add(spot.dx(), 0.004 + Math.max(0, shown - 1) * 0.004, spot.dz());
+            Location from = handCenter(s);
+            Location mid = from.clone().add(to).multiply(0.5).add(0, 0.5, 0);
+            discardTop.setItemStack(card.item());
+            discardTop.setTransformation(transform(cardScale, spot.yaw()));
+            discardTop.teleport(from);
+            discardTop.setTeleportDuration(3);
+            schedule(1, () -> discardTop.teleport(mid));
+            schedule(4, () -> discardTop.teleport(to));
+            schedule(11, () -> {
                 updateDiscard();
-            }
-            schedule(9, () -> renderHand(player));
+                renderHand(player);
+            });
+        } else {
+            updateDiscard();
+            renderHand(player);
         }
     }
 
@@ -621,11 +659,12 @@ public class Table implements Game.Events {
     public void onDraw(UUID player, int count, Card card) {
         Seat s = seats.get(player);
         if (s == null) return;
+        Location to = handCenter(s);
         for (int i = 0; i < count && i < 8; i++) {
-            schedule(i * 2, () -> fly(Card.back(), surface(-1.05, 0), s.base, 5));
+            schedule(i * 3, () -> fly(Card.back(), surface(-1.05, 0), to, 6));
         }
-        schedule(count * 2, () -> sound(Sound.ITEM_BOOK_PAGE_TURN, s.base, 0.5f, 1.7f));
-        schedule(count * 2 + 6, () -> {
+        schedule(count * 3, () -> sound(Sound.ITEM_BOOK_PAGE_TURN, to, 0.5f, 1.7f));
+        schedule(count * 3 + 8, () -> {
             updateHands(5);
             updateDiscard();
             renderHand(player);
@@ -638,7 +677,23 @@ public class Table implements Game.Events {
         Location at = s != null ? s.base : center;
         dust(at, org.bukkit.Color.fromRGB(0xFF5555), 15, 0.5);
         sound(Sound.BLOCK_NOTE_BLOCK_BASEDRUM, at, 0.7f, 1.4f);
-        if (s != null) seatText(s, "<red>⊘ 跳过", 20);
+        if (s == null || marker == null) return;
+        // 标识先到被跳过者头顶停留，再移动到下一个人
+        skipAnimating = true;
+        marker.show(headLocation(s), "<red><bold>⊘ " + name(target) + " 被跳过", 4);
+        schedule(18, () -> {
+            skipAnimating = false;
+            if (pendingTurn != null) {
+                showTurn(pendingTurn);
+                pendingTurn = null;
+            }
+        });
+    }
+
+    private void showTurn(UUID player) {
+        Seat s = seats.get(player);
+        if (s == null || marker == null) return;
+        marker.show(headLocation(s), "<gold><bold>▶ <" + game.activeColor.tag + ">" + name(player) + " <gold>的回合", 6);
     }
 
     @Override
@@ -670,6 +725,8 @@ public class Table implements Game.Events {
             dust(s.base, org.bukkit.Color.WHITE, 8, 0.45);
             sound(Sound.BLOCK_NOTE_BLOCK_PLING, s.base, 0.4f, 1.8f);
             for (UUID p : seats.keySet()) renderHand(p);
+            if (skipAnimating) pendingTurn = player;
+            else showTurn(player);
         }
     }
 
@@ -706,6 +763,7 @@ public class Table implements Game.Events {
 
     @Override
     public void onRoundEnd(UUID winner) {
+        if (marker != null) marker.hide();
         centerText(winner != null ? "<gold><bold>" + name(winner) + " 获胜！" : "<gray>本局结束", 60);
     }
 
@@ -758,8 +816,9 @@ public class Table implements Game.Events {
             for (ItemDisplay d : h.cards) if (d.isValid()) d.remove();
         }
         hands.clear();
-        for (ItemDisplay d : discardUnder) if (d.isValid()) d.remove();
-        discardUnder.clear();
+        for (ItemDisplay d : pileDisplays) if (d.isValid()) d.remove();
+        pileDisplays.clear();
+        if (marker != null) marker.remove();
         for (ArmorStand a : seatsEntities.values()) if (a.isValid()) a.remove();
         seatsEntities.clear();
         for (Entity e : new Entity[]{tableDisc, discardTop, colorDisc, dirDisc, drawLabel, colorLabel, dirLabel, drawHit, handHit}) {
