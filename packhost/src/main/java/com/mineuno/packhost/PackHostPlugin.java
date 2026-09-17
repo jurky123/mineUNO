@@ -7,6 +7,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.URI;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +26,8 @@ import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import net.kyori.adventure.resource.ResourcePackInfo;
+import net.kyori.adventure.resource.ResourcePackRequest;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
@@ -40,6 +43,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 /** 通用资源包管理：合并 packs/ 下的所有 zip，通过内置 HTTP 服务下发给客户端。 */
 public final class PackHostPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
+
+    /** 本插件资源包的固定 ID：发送与状态事件都以此为准，绝不处理其他插件的资源包。 */
+    private static final UUID PACK_ID = UUID.fromString("6d756e6f-0001-4000-8000-000000000001");
 
     private HttpServer server;
     private java.util.concurrent.ExecutorService executor;
@@ -231,10 +237,20 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     public void send(Player player) {
         if (url.isEmpty()) return;
-        MiniMessage mm = MiniMessage.miniMessage();
         boolean required = getConfig().getBoolean("required", false);
         String prompt = getConfig().getString("prompt", "<gold>服务器材质包");
-        player.setResourcePack(UUID.randomUUID(), url, hash, mm.deserialize(prompt), required);
+        player.sendResourcePacks(ResourcePackRequest.resourcePackRequest()
+                .packs(ResourcePackInfo.resourcePackInfo(PACK_ID, URI.create(url),
+                        hash.length == 0 ? "" : hex(hash)))
+                .required(required)
+                .prompt(MiniMessage.miniMessage().deserialize(prompt))
+                .build());
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) builder.append(String.format("%02x", b));
+        return builder.toString();
     }
 
     @EventHandler
@@ -248,6 +264,7 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     @EventHandler
     public void onStatus(PlayerResourcePackStatusEvent event) {
+        if (!PACK_ID.equals(event.getID())) return;
         switch (event.getStatus()) {
             case FAILED_DOWNLOAD -> {
                 event.getPlayer().sendMessage(MiniMessage.miniMessage()

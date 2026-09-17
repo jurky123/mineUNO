@@ -44,7 +44,6 @@ public class MatchManager {
     public void start() {
         ticker = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 40, 10);
         aimTicker = Bukkit.getScheduler().runTaskTimer(plugin, this::tickAim, 20, 2);
-        for (Player p : Bukkit.getOnlinePlayers()) resetMovement(p);
     }
 
     public void shutdown() {
@@ -373,7 +372,6 @@ public class MatchManager {
 
     public void quit(Player player) {
         stopTune(player);
-        resetMovement(player);
         Game g = gameOf(player.getUniqueId());
         if (g == null) return;
         if (g.phase == Game.Phase.WAITING) {
@@ -447,21 +445,31 @@ public class MatchManager {
     }
 
     /**
-     * 修复旧版本遗留的属性（只修我们当年写坏的具体值，绝不覆盖其他插件的正常设置）。
-     * 半速 bug 会留下 movement_speed≈0.05，锁定会留下 0；交互距离 6.0 也是旧版写入的。
+     * 一次性修复旧版本 UNO 污染过的属性（/uno repairlegacy 用）。
+     * 只匹配我们当年写坏的具体值，绝不按阈值"修数据"，避免覆盖其他插件的设置。
      * 注意：Bukkit 的 setWalkSpeed(x) 内部把属性存成 x/2，正常速度要用 0.2f。
      */
-    public void resetMovement(Player player) {
-        if (!plugin.cfg("game.repair-movement", true)) return;
+    public boolean repairLegacy(Player player) {
         AttributeInstance speed = player.getAttribute(Attribute.MOVEMENT_SPEED);
+        boolean changed = false;
         if (speed != null) {
             double value = speed.getBaseValue();
-            if (value <= 0.0001 || (value > 0.04 && value < 0.06)) player.setWalkSpeed(0.2f);
+            if (value <= 0.0001 || (value > 0.04 && value < 0.06)) {
+                player.setWalkSpeed(0.2f);
+                changed = true;
+            }
         }
         AttributeInstance jump = player.getAttribute(Attribute.JUMP_STRENGTH);
-        if (jump != null && jump.getBaseValue() <= 0.0001) jump.setBaseValue(0.42);
+        if (jump != null && jump.getBaseValue() <= 0.0001) {
+            jump.setBaseValue(0.42);
+            changed = true;
+        }
         AttributeInstance reach = player.getAttribute(Attribute.ENTITY_INTERACTION_RANGE);
-        if (reach != null && reach.getBaseValue() >= 5.9) reach.setBaseValue(3.0);
+        if (reach != null && Math.abs(reach.getBaseValue() - 6.0) < 0.01) {
+            reach.setBaseValue(3.0);
+            changed = true;
+        }
+        return changed;
     }
 
     // ---------- 计时 ----------

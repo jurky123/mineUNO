@@ -883,7 +883,7 @@ public class Table implements Game.Events {
         t.setTransformation(new Transformation(new Vector3f(), new Quaternionf(), new Vector3f(0.01f), new Quaternionf()));
         schedule(1, () -> t.setTransformation(new Transformation(new Vector3f(0, 0.2f, 0), new Quaternionf(),
                 new Vector3f(1.25f), new Quaternionf())));
-        schedule(ticks, t::remove);
+        schedule(ticks, () -> discardTemp(t));
     }
 
     private void centerText(String mini, int ticks) {
@@ -893,7 +893,7 @@ public class Table implements Game.Events {
         t.setTransformation(new Transformation(new Vector3f(), new Quaternionf(), new Vector3f(0.01f), new Quaternionf()));
         schedule(1, () -> t.setTransformation(new Transformation(new Vector3f(0, 0.25f, 0), new Quaternionf(),
                 new Vector3f(1.4f), new Quaternionf())));
-        schedule(ticks, t::remove);
+        schedule(ticks, () -> discardTemp(t));
     }
 
     // ---------- 清理 ----------

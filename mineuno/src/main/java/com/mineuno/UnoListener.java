@@ -128,12 +128,18 @@ public class UnoListener implements Listener {
     /** 对局中不许从座位上跳下来。 */
     @EventHandler
     public void onBreak(BlockBreakEvent event) {
-        if (plugin.matches().gameOf(event.getPlayer().getUniqueId()) != null) event.setCancelled(true);
+        if (inActiveGame(event.getPlayer())) event.setCancelled(true);
     }
 
     @EventHandler
     public void onPlace(BlockPlaceEvent event) {
-        if (plugin.matches().gameOf(event.getPlayer().getUniqueId()) != null) event.setCancelled(true);
+        if (inActiveGame(event.getPlayer())) event.setCancelled(true);
+    }
+
+    /** 只有真正开局后才限制建造：等待中的房间不影响正常游戏。 */
+    private boolean inActiveGame(Player player) {
+        Game game = plugin.matches().gameOf(player.getUniqueId());
+        return game != null && game.phase != Game.Phase.WAITING && game.phase != Game.Phase.ENDED;
     }
 
     /** 对局中不许从座位上下来。 */
@@ -141,7 +147,7 @@ public class UnoListener implements Listener {
     public void onDismount(EntityDismountEvent event) {
         if (!(event.getDismounted() instanceof ArmorStand)) return;
         if (!(event.getEntity() instanceof Player player)) return;
-        if (plugin.matches().gameOf(player.getUniqueId()) != null) event.setCancelled(true);
+        if (inActiveGame(player)) event.setCancelled(true);
     }
 
     /** 对局中死亡重生：直接在座位复活，避免跑到出生点。 */
@@ -162,7 +168,6 @@ public class UnoListener implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        plugin.matches().resetMovement(player);
         plugin.matches().hidePrivateFrom(player);
         Bukkit.getScheduler().runTaskLater(plugin, () -> plugin.matches().reconnect(player), 20);
     }

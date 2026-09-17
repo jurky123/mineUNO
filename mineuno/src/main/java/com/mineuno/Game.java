@@ -388,7 +388,6 @@ public class Game {
         events.onSkip(player);
         advance(2);
         events.onTurn(current());
-        if (hands.getOrDefault(offender, List.of()).isEmpty() && offender != null) endRound(offender);
         return true;
     }
 
@@ -509,7 +508,21 @@ public class Game {
         turn = rel(turn);
         UUID cur = current();
         if (phase == Phase.PICK_COLOR) {
-            chooseColor(cur, bestColor(cur));
+            Card played = top();
+            if (wildWasLast) {
+                // 出牌者用最后一张 Wild/Wild4 走完：离开也算本局赢家，不能被下家顶替
+                endRound(player);
+            } else {
+                activeColor = bestColor(cur);
+                phase = Phase.PLAYING;
+                events.onColor(activeColor);
+                if (played != null && played.type() == Card.Type.WILD4) {
+                    give(cur, 4);
+                    events.onSkip(cur);
+                    advance(1);
+                }
+                events.onTurn(current());
+            }
         } else if (phase == Phase.CHALLENGE) {
             if (player.equals(w4challenger)) {
                 // 质疑者退出：视为接受，由下一位承担 +4

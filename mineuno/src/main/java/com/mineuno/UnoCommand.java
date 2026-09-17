@@ -122,6 +122,24 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                 if (game == null || game.phase == Game.Phase.WAITING) MineUnoPlugin.msg(player, "<red>你不在牌局中");
                 else plugin.menus().openPanel(player, game);
             }
+            case "repairlegacy" -> {
+                if (!player.hasPermission("mineuno.admin")) {
+                    MineUnoPlugin.msg(player, "<red>没有权限");
+                    return true;
+                }
+                Player target = player;
+                if (args.length > 1) {
+                    target = Bukkit.getPlayerExact(args[1]);
+                    if (target == null) {
+                        MineUnoPlugin.msg(player, "<red>玩家不在线");
+                        return true;
+                    }
+                }
+                boolean changed = plugin.matches().repairLegacy(target);
+                MineUnoPlugin.msg(player, changed
+                        ? "<green>已修复 <white>" + target.getName() + " <green>被旧版本 UNO 写坏过的属性"
+                        : "<gray>" + target.getName() + " 没有需要修复的属性");
+            }
             case "seat" -> {
                 if (!player.hasPermission("mineuno.admin")) {
                     MineUnoPlugin.msg(player, "<red>没有权限");
@@ -262,6 +280,7 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                 subs.add("reload");
                 subs.add("handtune");
                 subs.add("seat");
+                subs.add("repairlegacy");
             }
             return match(subs, args[0]);
         }
@@ -277,6 +296,11 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                     List<String> slots = new ArrayList<>();
                     for (int i = 1; i <= plugin.arena().count(); i++) slots.add(String.valueOf(i));
                     return match(slots, args[1]);
+                }
+                case "repairlegacy" -> {
+                    List<String> names = new ArrayList<>();
+                    for (Player online : Bukkit.getOnlinePlayers()) names.add(online.getName());
+                    return match(names, args[1]);
                 }
                 case "play" -> {
                     if (sender instanceof Player p) {
