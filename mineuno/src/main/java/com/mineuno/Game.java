@@ -66,6 +66,7 @@ public class Game {
     public int turn;
     public int dir = 1;
     public int round;
+    public int turnSeq;
     public long deadline;
 
     public Card drawn;
@@ -216,6 +217,7 @@ public class Game {
 
     public void beginPlay() {
         phase = Phase.PLAYING;
+        turnSeq++;
         events.onTurn(current());
     }
 
@@ -292,7 +294,8 @@ public class Game {
             case REVERSE -> {
                 dir = -dir;
                 events.onReverse();
-                advance(1);
+                // 两人局反转等同跳过：对手失去回合，自己再出一张
+                advance(count() == 2 ? 2 : 1);
             }
             case DRAW2 -> {
                 give(next(1), 2);
@@ -301,6 +304,7 @@ public class Game {
             }
             case WILD, WILD4 -> {
                 phase = Phase.PICK_COLOR;
+                turnSeq++;
                 return true;
             }
         }
@@ -323,6 +327,7 @@ public class Game {
         if (playable(card)) {
             drawn = card;
             phase = Phase.POST_DRAW;
+            turnSeq++;
         } else {
             drawn = null;
             advance(1);
@@ -347,6 +352,7 @@ public class Game {
         if (played.type() == Card.Type.WILD4 && wild4Challenge && !wildWasLast) {
             w4challenger = next(1);
             phase = Phase.CHALLENGE;
+            turnSeq++;
             events.onChallenge(w4offender, w4challenger);
             return true;
         }
@@ -457,6 +463,7 @@ public class Game {
     private void advance(int steps) {
         turn = rel(turn + dir * steps);
         deadline = 0;
+        turnSeq++;
         if (phase == Phase.POST_DRAW || phase == Phase.PICK_COLOR || phase == Phase.CHALLENGE) {
             phase = Phase.PLAYING;
         }
@@ -493,23 +500,35 @@ public class Game {
             endMatch(current());
             return;
         }
-        if (index < turn) turn--;
+        if (index < turn) {
+            turn--;
+        } else if (index == turn && dir < 0) {
+            // 逆序时继任者是数组里前一位
+            turn = rel(turn - 1);
+        }
         turn = rel(turn);
         UUID cur = current();
         if (phase == Phase.PICK_COLOR) {
             chooseColor(cur, bestColor(cur));
         } else if (phase == Phase.CHALLENGE) {
             if (player.equals(w4challenger)) {
+                // 质疑者退出：视为接受，由下一位承担 +4
                 w4offender = w4challenger = null;
                 phase = Phase.PLAYING;
-                give(cur, 4);
-                events.onSkip(cur);
+                UUID victim = next(1);
+                give(victim, 4);
+                events.onSkip(victim);
                 advance(2);
                 events.onTurn(current());
             } else {
                 acceptWild4(w4challenger);
             }
-        } else if (phase == Phase.PLAYING || phase == Phase.POST_DRAW) {
+        } else if (phase == Phase.POST_DRAW) {
+            // 摸牌决策中退出：清掉待决策状态，让下家正常出牌
+            drawn = null;
+            phase = Phase.PLAYING;
+            events.onTurn(cur);
+        } else if (phase == Phase.PLAYING) {
             events.onTurn(cur);
         }
     }

@@ -29,9 +29,9 @@ import org.joml.Vector3f;
 /** 3D 桌面：座位、实体牌堆、动画、音效与粒子。 */
 public class Table implements Game.Events {
 
-    public record Hit(Table table, boolean draw) {}
+    public enum Kind { DRAW, PANEL, PAGE_PREV, PAGE_NEXT }
 
-    public static final Map<UUID, Hit> HITS = new HashMap<>();
+    public record Hit(Table table, Kind kind, UUID owner) {}
 
     private final MineUnoPlugin plugin;
     private final Game game;
@@ -54,12 +54,13 @@ public class Table implements Game.Events {
     private TextDisplay drawLabel, colorLabel, dirLabel;
     private Interaction drawHit, handHit;
     private final double lift;
-    private double handDistance, handHeight, handSpacing, handScale, handTilt, handYawOffset, handYawSpread;
+    private double handDistance, handHeight, handScale, handTilt, handYawOffset, handYawSpread;
     private final int handMax, rowsMax, pileShow;
     private final double rowGap, rowOffset, pileSpread, pileAngle;
     private TurnMarker marker;
     private UUID pendingTurn;
     private boolean skipAnimating;
+    private final int skipStay;
     private float dirYaw;
 
     private static class Seat {
@@ -78,14 +79,18 @@ public class Table implements Game.Events {
     private static class Hand {
         ItemDisplay[] cards = new ItemDisplay[0];
         final List<Card> shown = new ArrayList<>();
-        int selected = -1;
+        int selectedId = -1;
+        int page;
+        ItemDisplay prevArrow, nextArrow;
+        Interaction prevHit, nextHit;
+        TextDisplay pageText;
     }
 
-    public Table(MineUnoPlugin plugin, Game game) {
+    public Table(MineUnoPlugin plugin, Game game, Location center) {
         this.plugin = plugin;
         this.game = game;
-        this.world = plugin.arena().world();
-        this.center = plugin.arena().center();
+        this.center = center;
+        this.world = center.getWorld();
         this.surfaceY = plugin.cfg("table.height", 1.05);
         this.cardScale = plugin.cfg("table.card-scale", 1.5);
         this.rx = plugin.cfg("table.seat-radius-x", 3.8);
@@ -96,7 +101,6 @@ public class Table implements Game.Events {
         this.lift = plugin.cfg("table.lift", 0.125);
         this.handDistance = plugin.cfg("hand.distance", 1.30);
         this.handHeight = plugin.cfg("hand.height", 1.10);
-        this.handSpacing = plugin.cfg("hand.spacing", 0.26);
         this.handScale = plugin.cfg("hand.scale", 0.72);
         this.handTilt = plugin.cfg("hand.tilt", -45);
         this.handYawOffset = plugin.cfg("hand.yaw-offset", 0);
@@ -108,13 +112,13 @@ public class Table implements Game.Events {
         this.pileShow = plugin.cfg("pile.show", 12);
         this.pileSpread = plugin.cfg("pile.spread", 0.35);
         this.pileAngle = plugin.cfg("pile.angle", 20);
+        this.skipStay = plugin.cfg("turn.skip-stay", 30);
     }
 
     /** 热更新手牌参数（/uno hand 命令用）。 */
     public void reloadHand() {
         handDistance = plugin.cfg("hand.distance", 1.30);
         handHeight = plugin.cfg("hand.height", 1.10);
-        handSpacing = plugin.cfg("hand.spacing", 0.26);
         handScale = plugin.cfg("hand.scale", 0.72);
         handTilt = plugin.cfg("hand.tilt", -45);
         handYawOffset = plugin.cfg("hand.yaw-offset", 0);
@@ -130,6 +134,11 @@ public class Table implements Game.Events {
 
     public Game game() {
         return game;
+    }
+
+    /** 是否正在播放"被跳过"标识动画（此时下家的回合提示要延后）。 */
+    public boolean skipAnimating() {
+        return skipAnimating;
     }
 
     // ---------- 几何 ----------
@@ -213,18 +222,14 @@ public class Table implements Game.Events {
         double radius = plugin.cfg("game.seat-lock-radius", 0.6);
         ArmorStand seatEntity = seatsEntities.get(player);
         if (seatEntity == null || !seatEntity.isValid()) return;
-        if (seatEntity.getWorld() != seat.stand.getWorld()
-                || seatEntity.getLocation().distanceSquared(seat.stand) > radius * radius) {
-            Location at = seat.stand.clone().add(0, plugin.cfg("seat.y-offset", -0.9), 0);
-            at.setYaw(seat.stand.getYaw());
-            at.setPitch(0);
-            seatEntity.teleport(at);
+        Location home = seat.stand.clone().add(0, plugin.cfg("seat.y-offset", -0.9), 0);
+        home.setYaw(seat.stand.getYaw());
+        home.setPitch(0);
+        if (seatEntity.getWorld() != home.getWorld()
+                || seatEntity.getLocation().distanceSquared(home) > radius * radius) {
+            seatEntity.teleport(home);
         }
         if (!seatEntity.getPassengers().contains(p)) seatEntity.addPassenger(p);
-    }
-
-    public List<UUID> seatOwners() {
-        return new ArrayList<>(seats.keySet());
     }
 
     // ---------- 实体工具 ----------
@@ -282,7 +287,7 @@ public class Table implements Game.Events {
         at.setPitch(0);
         Location finalAt = at;
         return spawn(finalAt, ItemDisplay.class, d -> {
-            d.setItemStack(Card.back());
+            d.setItemStack(CardItems.back());
             d.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.GROUND);
             d.setTransformation(transformHand(0.01, 0, (float) handTilt, false));
             d.setBrightness(new Display.Brightness(15, 15));
@@ -302,22 +307,79 @@ public class Table implements Game.Events {
     public void hidePrivateFrom(Player player) {
         for (Map.Entry<UUID, Hand> e : hands.entrySet()) {
             if (e.getKey().equals(player.getUniqueId())) continue;
-            for (ItemDisplay d : e.getValue().cards) if (d.isValid()) player.hideEntity(plugin, d);
+            Hand h = e.getValue();
+            for (ItemDisplay d : h.cards) if (d.isValid()) player.hideEntity(plugin, d);
+            for (Entity entity : new Entity[]{h.prevArrow, h.nextArrow, h.pageText}) {
+                if (entity != null && entity.isValid()) player.hideEntity(plugin, entity);
+            }
         }
     }
 
     private void buildHands() {
         for (Map.Entry<UUID, Seat> e : seats.entrySet()) {
+            UUID owner = e.getKey();
+            Seat s = e.getValue();
             Hand h = new Hand();
             h.cards = new ItemDisplay[handMax];
             for (int i = 0; i < handMax; i++) {
-                ItemDisplay d = handDisplay(e.getValue().handBase);
+                ItemDisplay d = handDisplay(s.handBase);
                 h.cards[i] = d;
-                makePrivate(d, e.getKey());
+                makePrivate(d, owner);
             }
-            hands.put(e.getKey(), h);
-            renderHand(e.getKey());
+            // 左右翻页箭头 + 页码
+            h.prevArrow = handDisplay(arrowSpot(s, -1));
+            h.nextArrow = handDisplay(arrowSpot(s, 1));
+            h.prevArrow.setItemStack(CardItems.icon("page/prev", "<white>上一页"));
+            h.nextArrow.setItemStack(CardItems.icon("page/next", "<white>下一页"));
+            h.pageText = text(s.handBase.clone().add(0, 0.55, 0), "<gray>1/1", 0.6f);
+            for (Entity entity : new Entity[]{h.prevArrow, h.nextArrow, h.pageText}) makePrivate(entity, owner);
+            h.prevHit = hitbox(arrowSpot(s, -1), 0.45f, 0.6f);
+            h.nextHit = hitbox(arrowSpot(s, 1), 0.45f, 0.6f);
+            plugin.matches().registerHit(h.prevHit.getUniqueId(), new Hit(this, Kind.PAGE_PREV, owner));
+            plugin.matches().registerHit(h.nextHit.getUniqueId(), new Hit(this, Kind.PAGE_NEXT, owner));
+            hands.put(owner, h);
+            renderHand(owner);
         }
+    }
+
+    /** 箭头相对弧形中心的偏移角度（度）。 */
+    private double arrowAngle(int side) {
+        return side * (handYawSpread * (rowsMax - 1) / 2.0 + 14);
+    }
+
+    private Location arrowSpot(Seat s, int side) {
+        double angle = Math.toRadians(arrowAngle(side));
+        Location at = s.stand.clone().add(0, handHeight, 0)
+                .add(rotateY(s.inward, angle).multiply(handDistance));
+        at.setYaw(0);
+        at.setPitch(0);
+        return at;
+    }
+
+    /** 翻页（玩家只能操作自己的手牌）。 */
+    public void page(UUID player, int delta) {
+        Hand h = hands.get(player);
+        if (h == null) return;
+        int pages = HandLayout.pageCount(h.shown.size(), handMax);
+        if (pages <= 1) return;
+        h.page = Math.floorMod(h.page + delta, pages);
+        renderHand(player);
+    }
+
+    /** 手牌位置与朝向（第 i 张显示牌）。 */
+    private Location handLocation(Seat s, HandLayout.Slot slot, boolean selected) {
+        double angle = HandLayout.angle(slot.indexInRow(), slot.rowSize(), handYawSpread);
+        Location pivot = s.stand.clone().add(0, handHeight + slot.row() * rowGap, 0);
+        Location loc = pivot.add(rotateY(s.inward, Math.toRadians(angle))
+                .multiply(handDistance + slot.row() * rowOffset));
+        loc.setYaw(0);
+        loc.setPitch(0);
+        if (selected) loc.add(s.inward.clone().multiply(-0.24)).add(0, 0.10, 0);
+        return loc;
+    }
+
+    private float handYaw(Seat s, HandLayout.Slot slot) {
+        return s.handYaw + (float) handYawOffset + (float) HandLayout.angle(slot.indexInRow(), slot.rowSize(), handYawSpread);
     }
 
     public void renderHand(UUID player) {
@@ -325,34 +387,59 @@ public class Table implements Game.Events {
         Seat s = seats.get(player);
         if (h == null || s == null) return;
         List<Card> cards = new ArrayList<>(game.hand(player));
-        cards.sort(Comparator.comparingInt((Card c) -> c.color().ordinal())
-                .thenComparingInt(c -> c.type() == Card.Type.NUMBER ? c.number() : 100));
+        cards.sort(Card.SORT);
         h.shown.clear();
         h.shown.addAll(cards);
-        int n = Math.min(cards.size(), handMax);
-        List<HandLayout.Slot> slots = HandLayout.layout(n, rowsMax);
-        if (h.selected >= n) h.selected = -1;
+        h.page = HandLayout.clampPage(h.page, cards.size(), handMax);
+        int from = h.page * handMax;
+        int visible = Math.max(0, Math.min(handMax, cards.size() - from));
+        List<HandLayout.Slot> slots = HandLayout.layout(visible, rowsMax);
+        boolean multi = HandLayout.pageCount(cards.size(), handMax) > 1;
         for (int i = 0; i < h.cards.length; i++) {
             ItemDisplay d = h.cards[i];
             if (!d.isValid()) continue;
-            if (i >= n) {
+            if (i >= visible) {
                 d.setTransformation(transformHand(0.01, 0, (float) handTilt, false));
                 continue;
             }
-            Card card = cards.get(i);
-            boolean selected = i == h.selected;
+            Card card = cards.get(from + i);
             HandLayout.Slot slot = slots.get(i);
-            double angle = HandLayout.angle(slot.indexInRow(), slot.rowSize(), handYawSpread);
-            Location pivot = s.stand.clone().add(0, handHeight + slot.row() * rowGap, 0);
-            Location loc = pivot.add(rotateY(s.inward, Math.toRadians(angle)).multiply(handDistance + slot.row() * rowOffset));
-            loc.setYaw(0);
-            loc.setPitch(0);
-            d.setItemStack(card.item(game.canPlay(player, card)));
-            d.setTransformation(transformHand(handScale,
-                    s.handYaw + (float) handYawOffset + (float) angle, (float) handTilt, selected));
-            d.setTeleportDuration(4);
-            if (selected) loc.add(s.inward.clone().multiply(-0.24)).add(0, 0.10, 0);
-            d.teleport(loc);
+            d.setItemStack(CardItems.item(card, game.canPlay(player, card)));
+            placeCard(d, s, slot, card.id() == h.selectedId);
+        }
+        if (h.prevArrow != null && h.prevArrow.isValid()) {
+            h.prevArrow.setTransformation(transformHand(multi ? handScale * 0.8 : 0.01,
+                    s.handYaw + (float) handYawOffset + (float) arrowAngle(-1), (float) handTilt, false));
+        }
+        if (h.nextArrow != null && h.nextArrow.isValid()) {
+            h.nextArrow.setTransformation(transformHand(multi ? handScale * 0.8 : 0.01,
+                    s.handYaw + (float) handYawOffset + (float) arrowAngle(1), (float) handTilt, false));
+        }
+        if (h.pageText != null && h.pageText.isValid()) {
+            h.pageText.text(MineUnoPlugin.mm(multi
+                    ? "<gray>第 <white>" + (h.page + 1) + "<gray>/" + HandLayout.pageCount(cards.size(), handMax) + " <gray>页"
+                    : " "));
+        }
+    }
+
+    private void placeCard(ItemDisplay d, Seat s, HandLayout.Slot slot, boolean selected) {
+        d.setTransformation(transformHand(handScale, handYaw(s, slot), (float) handTilt, selected));
+        d.setTeleportDuration(4);
+        d.teleport(handLocation(s, slot, selected));
+    }
+
+    /** 只更新选中态：不动 ItemStack，避免每 2 tick 全量重建。 */
+    private void updateSelection(UUID player) {
+        Hand h = hands.get(player);
+        Seat s = seats.get(player);
+        if (h == null || s == null) return;
+        int from = h.page * handMax;
+        int visible = Math.max(0, Math.min(handMax, h.shown.size() - from));
+        List<HandLayout.Slot> slots = HandLayout.layout(visible, rowsMax);
+        for (int i = 0; i < visible; i++) {
+            ItemDisplay d = h.cards[i];
+            if (!d.isValid()) continue;
+            placeCard(d, s, slots.get(i), h.shown.get(from + i).id() == h.selectedId);
         }
     }
 
@@ -360,13 +447,14 @@ public class Table implements Game.Events {
     public void aim(Player player) {
         Hand h = hands.get(player.getUniqueId());
         if (h == null || h.shown.isEmpty()) return;
-        int n = Math.min(h.shown.size(), h.cards.length);
+        int from = h.page * handMax;
+        int visible = Math.max(0, Math.min(handMax, h.shown.size() - from));
         Location eye = player.getEyeLocation();
         Vector dir = eye.getDirection();
         int best = -1;
         double bestPerp = Double.MAX_VALUE;
         double radius = plugin.cfg("hand.aim-radius", 0.22);
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < visible; i++) {
             ItemDisplay d = h.cards[i];
             if (!d.isValid() || d.getWorld() != eye.getWorld()) continue;
             Vector to = d.getLocation().toVector().subtract(eye.toVector());
@@ -376,24 +464,22 @@ public class Table implements Game.Events {
             double perp = closest.subtract(to).length();
             if (perp <= radius && perp < bestPerp) {
                 bestPerp = perp;
-                best = i;
+                best = h.shown.get(from + i).id();
             }
         }
-        if (best != h.selected) {
-            h.selected = best;
-            renderHand(player.getUniqueId());
+        if (best != h.selectedId) {
+            h.selectedId = best;
+            updateSelection(player.getUniqueId());
         }
     }
 
     public int selectedCard(UUID player) {
         Hand h = hands.get(player);
-        if (h == null || h.selected < 0 || h.selected >= h.shown.size()) return -1;
-        return h.shown.get(h.selected).id();
-    }
-
-    public Location handBase(UUID player) {
-        Seat s = seats.get(player);
-        return s == null ? null : s.handBase.clone();
+        if (h == null || h.selectedId < 0) return -1;
+        for (Card card : h.shown) {
+            if (card.id() == h.selectedId) return card.id();
+        }
+        return -1;
     }
 
     private TextDisplay text(Location at, String mini, float scale) {
@@ -420,7 +506,17 @@ public class Table implements Game.Events {
     }
 
     private void schedule(int delay, Runnable run) {
-        tasks.add(Bukkit.getScheduler().runTaskLater(plugin, run, delay));
+        BukkitTask[] holder = new BukkitTask[1];
+        holder[0] = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            tasks.remove(holder[0]);
+            run.run();
+        }, delay);
+        tasks.add(holder[0]);
+    }
+
+    private void discardTemp(Entity entity) {
+        temp.remove(entity);
+        if (entity.isValid()) entity.remove();
     }
 
     private void sound(Sound sound, Location at, float volume, float pitch) {
@@ -456,34 +552,34 @@ public class Table implements Game.Events {
         d.setTeleportDuration(half);
         schedule(1, () -> d.teleport(mid));
         schedule(half + 1, () -> d.teleport(to));
-        schedule(ticks + 3, d::remove);
+        schedule(ticks + 3, () -> discardTemp(d));
     }
 
     // ---------- 构建 ----------
 
     public void build() {
-        tableDisc = display(Card.icon("table", "<gold>UNO 桌面"), surface(0, 0), plugin.cfg("table.size", 4.6) * 2, 0);
+        tableDisc = display(CardItems.icon("table", "<gold>UNO 桌面"), surface(0, 0), plugin.cfg("table.size", 4.6) * 2, 0);
 
         for (int i = 0; i < 3; i++) {
-            pile.add(display(Card.back(), surface(-1.05, 0).add(0, 0.006 * i, 0), cardScale, 0));
+            pile.add(display(CardItems.back(), surface(-1.05, 0).add(0, 0.006 * i, 0), cardScale, 0));
         }
         drawLabel = text(surface(-1.05, 0).add(0, 0.5, 0), "<white>牌堆", 0.55f);
 
-        discardTop = display(Card.back(), surface(1.05, 0), cardScale, 0);
+        discardTop = display(CardItems.back(), surface(1.05, 0), cardScale, 0);
         discardTop.setTransformation(transform(0.01, 0));
         for (int i = 0; i < pileShow; i++) {
-            pileDisplays.add(display(Card.back(), discardSpot(), 0.01, 0));
+            pileDisplays.add(display(CardItems.back(), discardSpot(), 0.01, 0));
         }
 
-        colorDisc = display(Card.icon("color/red", "<white>当前颜色"), surface(0, 0.75), 1.1, 0);
+        colorDisc = display(CardItems.icon("color/red", "<white>当前颜色"), surface(0, 0.75), 1.1, 0);
         colorLabel = text(surface(0, 0.75).add(0, 0.45, 0), "<white>当前颜色", 0.5f);
-        dirDisc = display(Card.icon("dir/cw", "<white>方向"), surface(0, -0.75), 1.1, 0);
+        dirDisc = display(CardItems.icon("dir/cw", "<white>方向"), surface(0, -0.75), 1.1, 0);
         dirLabel = text(surface(0, -0.75).add(0, 0.45, 0), "<white>方向：顺时针", 0.5f);
 
         drawHit = hitbox(surface(-1.15, 0).add(0, 0.35, 0), 3.0f, 1.4f);
-        HITS.put(drawHit.getUniqueId(), new Hit(this, true));
+        plugin.matches().registerHit(drawHit.getUniqueId(), new Hit(this, Kind.DRAW, null));
         handHit = hitbox(surface(1.15, 0).add(0, 0.35, 0), 3.0f, 1.4f);
-        HITS.put(handHit.getUniqueId(), new Hit(this, false));
+        plugin.matches().registerHit(handHit.getUniqueId(), new Hit(this, Kind.PANEL, null));
 
         marker = new TurnMarker(plugin, world);
         buildSeats();
@@ -513,7 +609,7 @@ public class Table implements Game.Events {
             seatsEntities.put(p, spawnSeat(s.stand));
 
             for (int k = 0; k < 5; k++) {
-                s.backs[k] = display(Card.back(), s.base, 0.01, 0);
+                s.backs[k] = display(CardItems.back(), s.base, 0.01, 0);
             }
             double ox = cos * (ix + 0.62), oz = sin * (iz + 0.62);
             s.count = text(surface(ox, oz).add(0, 0.28, 0), "<white>×0", 0.7f);
@@ -564,7 +660,7 @@ public class Table implements Game.Events {
             }
             Card card = game.discard.get(game.discard.size() - 1 - i);
             PileLayout.Spot spot = PileLayout.spot(card, pileSpread, pileAngle);
-            d.setItemStack(card.item());
+            d.setItemStack(CardItems.item(card, false));
             d.setTransformation(transform(cardScale, spot.yaw()));
             d.teleport(discardSpot().clone().add(spot.dx(), 0.004 + (shown - 1 - i) * 0.004, spot.dz()));
         }
@@ -583,19 +679,19 @@ public class Table implements Game.Events {
     }
 
     private void updateColor() {
-        colorDisc.setItemStack(Card.icon("color/" + game.activeColor.tag, "<white>当前颜色"));
+        colorDisc.setItemStack(CardItems.icon("color/" + game.activeColor.tag, "<white>当前颜色"));
         colorLabel.text(MineUnoPlugin.mm("<" + game.activeColor.tag + ">当前颜色：" + game.activeColor.cn));
     }
 
     private void updateDir() {
         boolean cw = game.dir > 0;
-        dirDisc.setItemStack(Card.icon("dir/" + (cw ? "cw" : "ccw"), "<white>方向"));
+        dirDisc.setItemStack(CardItems.icon("dir/" + (cw ? "cw" : "ccw"), "<white>方向"));
         dirLabel.text(MineUnoPlugin.mm("<white>方向：" + (cw ? "顺时针" : "逆时针")));
     }
 
     // ---------- 动画入口 ----------
 
-    public void deal() {
+    public void deal(Runnable onDone) {
         updateDiscard();
         updateColor();
         updateDir();
@@ -606,7 +702,7 @@ public class Table implements Game.Events {
                 int delay = r * 3;
                 Seat s = seats.get(p);
                 if (s == null) continue;
-                schedule(delay, () -> fly(Card.back(), surface(-1.05, 0), seatSurface(s), 5));
+                schedule(delay, () -> fly(CardItems.back(), surface(-1.05, 0), seatSurface(s), 5));
             }
             int round = r + 1;
             schedule(r * 3 + 5, () -> {
@@ -618,7 +714,7 @@ public class Table implements Game.Events {
             sound(Sound.BLOCK_LEVER_CLICK, surface(1.05, 0), 0.8f, 0.8f);
             dust(surface(1.05, 0), game.activeColor, 20);
             update();
-            game.beginPlay();
+            onDone.run();
         });
     }
 
@@ -635,7 +731,7 @@ public class Table implements Game.Events {
             Location to = discardSpot().clone().add(spot.dx(), 0.004 + Math.max(0, shown - 1) * 0.004, spot.dz());
             Location from = handCenter(s);
             Location mid = from.clone().add(to).multiply(0.5).add(0, 0.5, 0);
-            discardTop.setItemStack(card.item());
+            discardTop.setItemStack(CardItems.item(card, false));
             discardTop.setTransformation(transform(cardScale, spot.yaw()));
             discardTop.teleport(from);
             discardTop.setTeleportDuration(3);
@@ -661,7 +757,7 @@ public class Table implements Game.Events {
         if (s == null) return;
         Location to = handCenter(s);
         for (int i = 0; i < count && i < 8; i++) {
-            schedule(i * 3, () -> fly(Card.back(), surface(-1.05, 0), to, 6));
+            schedule(i * 3, () -> fly(CardItems.back(), surface(-1.05, 0), to, 6));
         }
         schedule(count * 3, () -> sound(Sound.ITEM_BOOK_PAGE_TURN, to, 0.5f, 1.7f));
         schedule(count * 3 + 8, () -> {
@@ -681,7 +777,7 @@ public class Table implements Game.Events {
         // 标识先到被跳过者头顶停留，再移动到下一个人
         skipAnimating = true;
         marker.show(headLocation(s), "<red><bold>⊘ " + name(target) + " 被跳过", 4);
-        schedule(18, () -> {
+        schedule(skipStay, () -> {
             skipAnimating = false;
             if (pendingTurn != null) {
                 showTurn(pendingTurn);
@@ -814,6 +910,9 @@ public class Table implements Game.Events {
         seats.clear();
         for (Hand h : hands.values()) {
             for (ItemDisplay d : h.cards) if (d.isValid()) d.remove();
+            for (Entity entity : new Entity[]{h.prevArrow, h.nextArrow, h.pageText, h.prevHit, h.nextHit}) {
+                if (entity != null && entity.isValid()) entity.remove();
+            }
         }
         hands.clear();
         for (ItemDisplay d : pileDisplays) if (d.isValid()) d.remove();
@@ -826,6 +925,6 @@ public class Table implements Game.Events {
         }
         for (ItemDisplay d : pile) if (d.isValid()) d.remove();
         pile.clear();
-        HITS.entrySet().removeIf(en -> en.getValue().table() == this);
+        plugin.matches().unregisterHits(this);
     }
 }

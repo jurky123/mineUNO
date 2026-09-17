@@ -11,6 +11,7 @@ import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,6 +42,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class PackHostPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
     private HttpServer server;
+    private java.util.concurrent.ExecutorService executor;
     private File output;
     private byte[] hash = new byte[0];
     private String url = "";
@@ -72,7 +74,10 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         output.getParentFile().mkdirs();
 
         Map<String, byte[]> entries = new LinkedHashMap<>();
-        addDirectory(looseDir, entries);
+        if (!addDirectory(looseDir, looseDir, entries)) {
+            getLogger().severe("散装目录读取失败，已取消本次重建（保留旧资源包）");
+            return;
+        }
         File[] zips = packsDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".zip"));
         if (zips != null) {
             Arrays.sort(zips, Comparator.comparing(File::getName));
@@ -80,7 +85,8 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         }
         entries.putIfAbsent("pack.mcmeta", defaultMeta());
 
-        try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(output))) {
+        File temp = new File(output.getParentFile(), "pack.zip.tmp");
+        try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(temp))) {
             for (Map.Entry<String, byte[]> e : entries.entrySet()) {
                 ZipEntry entry = new ZipEntry(e.getKey());
                 entry.setTime(0);
@@ -92,6 +98,18 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
             getLogger().severe("合并资源包失败: " + e.getMessage());
             return;
         }
+        // 原子替换，避免下载方读到半成品
+        try {
+            Files.move(temp.toPath(), output.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException atomicFailed) {
+            try {
+                Files.move(temp.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                getLogger().severe("替换资源包失败: " + e.getMessage());
+                return;
+            }
+        }
         hash = sha1(output);
         url = "http://" + address() + ":" + getConfig().getInt("port", 8123) + "/pack.zip";
         getLogger().info("已合并 " + entries.size() + " 个文件 -> " + output.getName() + " (" + output.length() / 1024 + " KB)");
@@ -102,19 +120,23 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
                 + "\"description\":\"PackHost\"}}").getBytes(StandardCharsets.UTF_8);
     }
 
-    private void addDirectory(File dir, Map<String, byte[]> entries) {
+    /** root 固定为散装目录本身，所有 entry 都用相对 root 的路径（保留目录结构）。 */
+    private boolean addDirectory(File root, File dir, Map<String, byte[]> entries) {
         File[] files = dir.listFiles();
-        if (files == null) return;
+        if (files == null) return true;
         for (File f : files) {
             if (f.isDirectory()) {
-                addDirectory(f, entries);
+                if (!addDirectory(root, f, entries)) return false;
             } else {
                 try {
-                    entries.put(relative(dir, f), Files.readAllBytes(f.toPath()));
-                } catch (IOException ignored) {
+                    entries.put(relative(root, f), Files.readAllBytes(f.toPath()));
+                } catch (IOException e) {
+                    getLogger().warning("读取 " + f.getPath() + " 失败: " + e.getMessage());
+                    return false;
                 }
             }
         }
+        return true;
     }
 
     private String relative(File base, File file) {
@@ -186,7 +208,8 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
                 exchange.getResponseBody().write(body);
                 exchange.close();
             });
-            server.setExecutor(Executors.newFixedThreadPool(2));
+            executor = Executors.newFixedThreadPool(2);
+            server.setExecutor(executor);
             server.start();
         } catch (IOException e) {
             getLogger().severe("HTTP 服务启动失败: " + e.getMessage());
@@ -197,6 +220,10 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         if (server != null) {
             server.stop(0);
             server = null;
+        }
+        if (executor != null) {
+            executor.shutdownNow();
+            executor = null;
         }
     }
 

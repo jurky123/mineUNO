@@ -27,7 +27,7 @@ public final class MineUnoPlugin extends JavaPlugin {
         getCommand("uno").setTabCompleter(command);
         Bukkit.getPluginManager().registerEvents(new UnoListener(this), this);
         matches.start();
-        getLogger().info("MineUNO 已启用，竞技场: " + arena.world + " " + arena.x + "," + arena.y + "," + arena.z);
+        getLogger().info("MineUNO 已启用，竞技场数量: " + arena.count() + "，首个: " + arena.name(0));
     }
 
     @Override

@@ -25,6 +25,14 @@ public final class HandLayout {
         return slots;
     }
 
+    public static int pageCount(int count, int pageSize) {
+        return count <= 0 ? 1 : (count + pageSize - 1) / pageSize;
+    }
+
+    public static int clampPage(int page, int count, int pageSize) {
+        return Math.max(0, Math.min(pageCount(count, pageSize) - 1, page));
+    }
+
     /** 排内第 index 张相对扇形中心的角度（度）。 */
     public static double angle(int indexInRow, int rowSize, double step) {
         return (indexInRow - (rowSize - 1) / 2.0) * step;

@@ -19,7 +19,11 @@ import org.bukkit.inventory.meta.SkullMeta;
 /** 全部 GUI：大厅、准备、手牌、选色、质疑。 */
 public class Menus {
 
-    public record Holder(String type, UUID game) implements InventoryHolder {
+    public record Holder(String type, UUID game, List<UUID> rooms) implements InventoryHolder {
+        public Holder(String type, UUID game) {
+            this(type, game, List.of());
+        }
+
         @Override
         public Inventory getInventory() {
             return null;
@@ -36,6 +40,13 @@ public class Menus {
         return Bukkit.createInventory(new Holder(type, game), rows * 9, MineUnoPlugin.mm(title));
     }
 
+    /** 不在 InventoryClickEvent 里同步换窗口，统一延后一 tick。 */
+    private void later(Player player, Runnable action) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (player.isOnline()) action.run();
+        });
+    }
+
     private static ItemStack item(Material material, String name, List<String> lore) {
         ItemStack stack = ItemStack.of(material);
         stack.editMeta(meta -> {
@@ -50,6 +61,8 @@ public class Menus {
     private record Rule(Material material, String name, List<String> lore) {}
 
     private final Map<UUID, Integer> rulePages = new HashMap<>();
+
+    private static final List<List<Rule>> RULES = rulePages();
 
     private static List<List<Rule>> rulePages() {
         return List.of(
@@ -150,7 +163,8 @@ public class Menus {
                         new Rule(Material.ARMOR_STAND, "<gold><bold>3D 手牌", List.of(
                                 "<gray>手牌是悬浮在你面前的实体牌，只有你能看见",
                                 "<gray>把准星移到某张牌上：它会往外移并发光",
-                                "<gray>左键打出选中的牌")),
+                                "<gray>左键打出选中的牌",
+                                "<gray>超过 16 张时用左右两侧的箭头翻页")),
                         new Rule(Material.PAPER, "<gold><bold>摸牌", List.of(
                                 "<gray>右键任意位置，或对准牌堆右键",
                                 "<gray>摸到的牌会加入你的手牌")),
@@ -162,17 +176,18 @@ public class Menus {
                                 "<gray>面板：摸牌 / 结束回合 / UNO! / 规则 / 离开牌局")),
                         new Rule(Material.COMMAND_BLOCK, "<gold><bold>常用命令", List.of(
                                 "<gray>/uno uno 喊 UNO · /uno leave 离开牌局",
-                                "<gray>/uno setarena 设置牌桌（OP）· /uno list 房间列表"))));
+                                "<gray>/uno cards 列出手牌 · /uno play <序号> 指定出牌",
+                                "<gray>/uno setarena [编号] 设置牌桌（OP）· /uno list 房间列表"))));
     }
 
     public void openRules(Player player, int page) {
-        int pages = rulePages().size();
+        int pages = RULES.size();
         page = Math.max(0, Math.min(pages - 1, page));
         rulePages.put(player.getUniqueId(), page);
         Inventory inv = create("rules", null, 6, "<gold><bold>MineUNO</bold> <gray>规则与教程");
         inv.setItem(4, item(Material.BOOK, "<yellow><bold>第 " + (page + 1) + " / " + pages + " 页", List.of(
                 "<gray>点击下方箭头翻页")));
-        List<Rule> rules = rulePages().get(page);
+        List<Rule> rules = RULES.get(page);
         int[] slots = {19, 20, 21, 22, 23, 24, 25};
         for (int i = 0; i < rules.size() && i < slots.length; i++) {
             Rule rule = rules.get(i);
@@ -181,13 +196,16 @@ public class Menus {
         inv.setItem(45, item(Material.ARROW, "<white>上一页", List.of()));
         inv.setItem(49, item(Material.BARRIER, "<red>关闭", List.of()));
         inv.setItem(53, item(Material.ARROW, "<white>下一页", List.of()));
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     // ---------- 大厅 ----------
 
     public void openMain(Player player) {
-        Inventory inv = create("main", null, 3, "<gold><bold>MineUNO</bold> <gray>大厅");
+        List<Game> rooms = new ArrayList<>(plugin.matches().games());
+        Inventory inv = Bukkit.createInventory(
+                new Holder("main", null, rooms.stream().map(room -> room.id).toList()),
+                27, MineUnoPlugin.mm("<gold><bold>MineUNO</bold> <gray>大厅"));
         inv.setItem(4, item(Material.BOOK, "<yellow><bold>规则与教程",
                 List.of("<gray>玩法 / 功能牌 / UNO / 质疑 / 操作")));
         inv.setItem(11, item(Material.LIME_CONCRETE, "<green><bold>创建房间 · Quick",
@@ -196,11 +214,11 @@ public class Menus {
                 List.of("<gray>官方计分，先到 500 分者获胜", "<yellow>点击创建")));
         inv.setItem(15, item(Material.CLOCK, "<white>刷新列表", List.of("<gray>重新载入房间列表")));
         int slot = 18;
-        for (Game game : plugin.matches().games()) {
+        for (Game game : rooms) {
             if (slot > 26) break;
             inv.setItem(slot++, gameIcon(game));
         }
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     private ItemStack gameIcon(Game game) {
@@ -253,7 +271,7 @@ public class Menus {
         inv.setItem(22, item(Material.BARRIER, "<red>离开房间", List.of()));
         inv.setItem(26, item(Material.PAPER, "<gray>关掉界面后回到房间",
                 List.of("<gray>输入 <white>/uno <gray>重新打开")));
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     // ---------- 控制面板 ----------
@@ -271,7 +289,7 @@ public class Menus {
         inv.setItem(16, item(Material.BOOK, "<yellow>规则与教程", List.of("<gray>玩法 / 功能牌 / 质疑 / 操作")));
         inv.setItem(22, item(Material.RED_CONCRETE, "<red>离开牌局", List.of("<gray>游戏中离开视为弃权")));
         inv.setItem(26, item(Material.BARRIER, "<red>关闭", List.of()));
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     // ---------- 选色 / 质疑 ----------
@@ -283,7 +301,7 @@ public class Menus {
             Card.Color color = Card.COLORS.get(i);
             inv.setItem(slots[i], colorIcon(color));
         }
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     private ItemStack colorIcon(Card.Color color) {
@@ -301,7 +319,7 @@ public class Menus {
         Inventory inv = create("challenge", game.id, 3, "<red><bold>+4 质疑");
         inv.setItem(11, item(Material.LIME_CONCRETE, "<green><bold>接受 +4", List.of("<gray>摸 4 张牌并跳过回合")));
         inv.setItem(15, item(Material.RED_CONCRETE, "<red><bold>质疑", List.of("<gray>对方若确实违规：他摸 4 张", "<gray>对方若无违规：你摸 6 张")));
-        player.openInventory(inv);
+        later(player, () -> player.openInventory(inv));
     }
 
     // ---------- 刷新 ----------
@@ -333,20 +351,18 @@ public class Menus {
                 else if (slot == 13) create(player, Game.Mode.CLASSIC);
                 else if (slot == 15) openMain(player);
                 else if (slot >= 18 && slot <= 26) {
-                    List<Game> games = new ArrayList<>(plugin.matches().games());
                     int index = slot - 18;
-                    if (index < games.size() && plugin.matches().join(player, games.get(index))) {
-                        openLobby(player, games.get(index));
-                    }
+                    if (index >= holder.rooms().size()) return;
+                    Game target = plugin.matches().game(holder.rooms().get(index));
+                    if (target != null && plugin.matches().join(player, target)) openLobby(player, target);
                 }
             }
             case "lobby" -> {
                 if (game == null || !game.hands.containsKey(player.getUniqueId())) return;
                 if (slot == 20) {
-                    if (!game.ready.remove(player.getUniqueId())) game.ready.add(player.getUniqueId());
-                    plugin.matches().refreshLobby(game);
+                    plugin.matches().toggleReady(player);
                 } else if (slot == 24) {
-                    if (plugin.matches().start(player, game)) player.closeInventory();
+                    later(player, () -> plugin.matches().start(player, game));
                 } else if (slot == 22) {
                     plugin.matches().leave(player);
                     openMain(player);
@@ -367,10 +383,13 @@ public class Menus {
                     }
                     case 22 -> {
                         plugin.matches().leave(player);
-                        player.closeInventory();
+                        later(player, player::closeInventory);
                         return;
                     }
-                    case 26 -> player.closeInventory();
+                    case 26 -> {
+                        later(player, player::closeInventory);
+                        return;
+                    }
                     default -> {
                     }
                 }
@@ -387,20 +406,20 @@ public class Menus {
                 };
                 if (color != null) {
                     plugin.matches().chooseColor(player, game, color);
-                    player.closeInventory();
+                    later(player, player::closeInventory);
                 }
             }
             case "challenge" -> {
                 if (game == null) return;
                 if (slot == 11) plugin.matches().accept(player, game);
                 else if (slot == 15) plugin.matches().challenge(player, game);
-                player.closeInventory();
+                later(player, player::closeInventory);
             }
             case "rules" -> {
                 int page = rulePages.getOrDefault(player.getUniqueId(), 0);
                 if (slot == 45) openRules(player, page - 1);
                 else if (slot == 53) openRules(player, page + 1);
-                else if (slot == 49) player.closeInventory();
+                else if (slot == 49) later(player, player::closeInventory);
             }
             default -> {
             }

@@ -23,7 +23,8 @@ game:
   turn-time: 30        # 回合超时（秒）
   challenge-time: 8    # 质疑窗口（秒）
   reconnect-grace: 60  # 断线保留时间（秒）
-  seat-lock-radius: 0.6 # 对局中允许离开座位的距离（方块）
+  seat-lock-radius: 0.6
+  repair-movement: true # 修复旧版本遗留的属性（不影响其他插件设置） # 对局中允许离开座位的距离（方块）
   interaction-range: 6.0 # 对局中的交互距离（方便点到桌面）
   default-mode: QUICK  # QUICK / CLASSIC
 
@@ -45,6 +46,7 @@ pile:
 
 turn:
   title: true     # 回合/跳过是否弹标题提示
+  skip-stay: 30   # "被跳过"标识停留的 tick 数（20 tick = 1 秒）
 
 visual:
   animations: true

@@ -41,6 +41,43 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                 }
             }
             case "rules", "help" -> plugin.menus().openRules(player, 0);
+            case "cards" -> {
+                if (game == null || game.phase == Game.Phase.WAITING) {
+                    MineUnoPlugin.msg(player, "<red>你不在牌局中");
+                    return true;
+                }
+                List<Card> hand = hand(game, player);
+                MineUnoPlugin.msg(player, "<gold>你的手牌（共 " + hand.size() + " 张）：<gray>可用 /uno play <序号> 出牌");
+                StringBuilder line = new StringBuilder();
+                for (int i = 0; i < hand.size(); i++) {
+                    line.append("<gray>").append(i + 1).append(".").append(hand.get(i).coloredName()).append("  ");
+                    if ((i + 1) % 8 == 0 || i == hand.size() - 1) {
+                        MineUnoPlugin.msg(player, line.toString());
+                        line.setLength(0);
+                    }
+                }
+            }
+            case "play" -> {
+                if (game == null || game.phase == Game.Phase.WAITING) {
+                    MineUnoPlugin.msg(player, "<red>你不在牌局中");
+                    return true;
+                }
+                if (args.length < 2) {
+                    MineUnoPlugin.msg(player, "<red>用法：/uno play <序号>（用 /uno cards 查看序号）");
+                    return true;
+                }
+                try {
+                    int index = Integer.parseInt(args[1]) - 1;
+                    List<Card> hand = hand(game, player);
+                    if (index < 0 || index >= hand.size()) {
+                        MineUnoPlugin.msg(player, "<red>序号超出范围（1~" + hand.size() + "）");
+                        return true;
+                    }
+                    plugin.matches().play(player, game, hand.get(index).id());
+                } catch (NumberFormatException e) {
+                    MineUnoPlugin.msg(player, "<red>序号必须是数字");
+                }
+            }
             case "create" -> {
                 Game.Mode mode = args.length > 1 && args[1].equalsIgnoreCase("classic")
                         ? Game.Mode.CLASSIC : Game.Mode.QUICK;
@@ -78,17 +115,8 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                 }
             }
             case "ready" -> {
-                if (game == null) {
-                    MineUnoPlugin.msg(player, "<red>你不在任何房间中");
-                } else {
-                    if (!game.ready.remove(player.getUniqueId())) {
-                        game.ready.add(player.getUniqueId());
-                        plugin.matches().send(game, "<green>" + player.getName() + " 已准备");
-                    } else {
-                        plugin.matches().send(game, "<yellow>" + player.getName() + " 取消准备");
-                    }
-                    plugin.matches().refreshLobby(game);
-                }
+                if (game == null) MineUnoPlugin.msg(player, "<red>你不在任何房间中");
+                else plugin.matches().toggleReady(player);
             }
             case "hand", "panel" -> {
                 if (game == null || game.phase == Game.Phase.WAITING) MineUnoPlugin.msg(player, "<red>你不在牌局中");
@@ -159,9 +187,17 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                     MineUnoPlugin.msg(player, "<red>没有权限");
                     return true;
                 }
-                plugin.arena().save(player.getLocation());
-                MineUnoPlugin.msg(player, "<green>竞技场中心已设为当前位置：" + player.getWorld().getName()
-                        + " " + (int) player.getX() + "," + (int) player.getY() + "," + (int) player.getZ());
+                int index = 0;
+                if (args.length > 1) {
+                    try {
+                        index = Math.max(0, Integer.parseInt(args[1]) - 1);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                plugin.arena().save(index, player.getLocation());
+                MineUnoPlugin.msg(player, "<green>竞技场 #" + (index + 1) + " 已设为当前位置："
+                        + player.getWorld().getName() + " " + (int) player.getX() + "," + (int) player.getY()
+                        + "," + (int) player.getZ() + " <gray>（共 " + plugin.arena().count() + " 个）");
             }
             case "reload" -> {
                 if (!player.hasPermission("mineuno.admin")) {
@@ -180,6 +216,12 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
             }
         }
         return true;
+    }
+
+    private List<Card> hand(Game game, Player player) {
+        List<Card> hand = new ArrayList<>(game.hand(player.getUniqueId()));
+        hand.sort(Card.SORT);
+        return hand;
     }
 
     private void handTune(Player player, String[] args) {
@@ -213,7 +255,8 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             List<String> subs = new ArrayList<>(List.of("create", "join", "leave", "start", "ready", "hand",
-                    "panel", "draw", "pass", "uno", "catch", "accept", "challenge", "list", "rules", "help"));
+                    "panel", "draw", "pass", "uno", "catch", "accept", "challenge", "list", "rules", "help",
+                    "cards", "play"));
             if (sender.hasPermission("mineuno.admin")) {
                 subs.add("setarena");
                 subs.add("reload");
@@ -229,6 +272,23 @@ public class UnoCommand implements CommandExecutor, TabCompleter {
                 }
                 case "create" -> {
                     return match(List.of("quick", "classic"), args[1]);
+                }
+                case "setarena" -> {
+                    List<String> slots = new ArrayList<>();
+                    for (int i = 1; i <= plugin.arena().count(); i++) slots.add(String.valueOf(i));
+                    return match(slots, args[1]);
+                }
+                case "play" -> {
+                    if (sender instanceof Player p) {
+                        Game g = plugin.matches().gameOf(p.getUniqueId());
+                        if (g != null) {
+                            List<String> indices = new ArrayList<>();
+                            int size = Math.min(20, g.hand(p.getUniqueId()).size());
+                            for (int i = 1; i <= size; i++) indices.add(String.valueOf(i));
+                            return match(indices, args[1]);
+                        }
+                    }
+                    return List.of();
                 }
                 case "join" -> {
                     List<String> names = new ArrayList<>();

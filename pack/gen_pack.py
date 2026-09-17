@@ -166,6 +166,17 @@ def dir_arrow(cw=True):
     return img
 
 
+def page_arrow(point_right=True):
+    img = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([6, 6, 122, 122], fill=(38, 38, 46, 225), outline=(255, 255, 255, 235), width=5)
+    if point_right:
+        d.polygon([(46, 32), (88, 64), (46, 96)], fill=(255, 255, 255, 245))
+    else:
+        d.polygon([(82, 32), (40, 64), (82, 96)], fill=(255, 255, 255, 245))
+    return img
+
+
 def table_texture():
     img = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -219,6 +230,9 @@ def main():
     for name, cw in (("cw", True), ("ccw", False)):
         save(dir_arrow(cw), "dir/" + name)
         item_defs("dir/" + name, "dir/" + name)
+    for name, right in (("next", True), ("prev", False)):
+        save(page_arrow(right), "page/" + name)
+        item_defs("page/" + name, "page/" + name)
     for texture in textures:
         item_defs(texture, texture)
 

@@ -25,10 +25,12 @@ public class MatchManager {
     private final Map<UUID, Game> games = new LinkedHashMap<>();
     private final Map<UUID, Game> playerGame = new HashMap<>();
     private final Map<UUID, Table> tables = new HashMap<>();
+    private final Map<UUID, Integer> slots = new HashMap<>();
+    private final Map<UUID, Table.Hit> hits = new HashMap<>();
     private final Map<UUID, Hud> huds = new HashMap<>();
     private final Map<UUID, Location> back = new HashMap<>();
     private final Map<UUID, Long> grace = new HashMap<>();
-    private final Map<UUID, String> lastState = new HashMap<>();
+    private final Map<UUID, Integer> lastSeq = new HashMap<>();
     private final Map<UUID, Double> reachBackup = new HashMap<>();
     private final Map<UUID, String> tuning = new HashMap<>();
     private BukkitTask ticker;
@@ -52,7 +54,7 @@ public class MatchManager {
     }
 
     public Collection<Game> games() {
-        return games.values();
+        return java.util.Collections.unmodifiableCollection(games.values());
     }
 
     public Game game(UUID id) {
@@ -64,7 +66,7 @@ public class MatchManager {
     }
 
     private Table tableOf(Game g) {
-        return tables.computeIfAbsent(g.id, id -> new Table(plugin, g));
+        return tables.computeIfAbsent(g.id, id -> new Table(plugin, g, plugin.arena().center(0)));
     }
 
     public Table table(Game g) {
@@ -133,6 +135,18 @@ public class MatchManager {
     /** 手牌只对本人可见，新进服的玩家需要隐藏其他人的手牌。 */
     public void hidePrivateFrom(Player player) {
         for (Table table : tables.values()) table.hidePrivateFrom(player);
+    }
+
+    public void registerHit(UUID entityId, Table.Hit hit) {
+        hits.put(entityId, hit);
+    }
+
+    public Table.Hit hit(UUID entityId) {
+        return hits.get(entityId);
+    }
+
+    public void unregisterHits(Table table) {
+        hits.entrySet().removeIf(entry -> entry.getValue().table() == table);
     }
 
     private void tickAim() {
@@ -210,6 +224,19 @@ public class MatchManager {
         }
     }
 
+    /** 准备 / 取消准备（GUI 与命令共用同一入口）。 */
+    public void toggleReady(Player player) {
+        Game g = gameOf(player.getUniqueId());
+        if (g == null || g.phase != Game.Phase.WAITING) return;
+        if (!g.ready.remove(player.getUniqueId())) {
+            g.ready.add(player.getUniqueId());
+            send(g, "<green>" + name(player.getUniqueId()) + " 已准备");
+        } else {
+            send(g, "<yellow>" + name(player.getUniqueId()) + " 取消准备");
+        }
+        refreshLobby(g);
+    }
+
     public boolean start(Player player, Game g) {
         if (g.phase != Game.Phase.WAITING) {
             MineUnoPlugin.msg(player, "<red>游戏已经开始或结束");
@@ -242,7 +269,11 @@ public class MatchManager {
     }
 
     private void startMatch(Game g) {
-        Table table = tableOf(g);
+        int slot = plugin.arena().allocate();
+        if (slot < 0) throw new IllegalStateException("没有空闲牌桌（等待其他对局结束，或在配置里增加竞技场坐标）");
+        slots.put(g.id, slot);
+        Table table = new Table(plugin, g, plugin.arena().center(slot));
+        tables.put(g.id, table);
         table.build();
         for (UUID id : g.order()) {
             Player p = Bukkit.getPlayer(id);
@@ -263,7 +294,7 @@ public class MatchManager {
         games.remove(g.id);
         tables.remove(g.id);
         huds.remove(g.id);
-        lastState.remove(g.id);
+        lastSeq.remove(g.id);
         for (UUID id : new ArrayList<>(g.hands.keySet())) {
             playerGame.remove(id);
             back.remove(id);
@@ -276,6 +307,8 @@ public class MatchManager {
         if (!games.containsKey(g.id)) return;
         Table table = tables.remove(g.id);
         if (table != null) table.remove();
+        Integer slot = slots.remove(g.id);
+        if (slot != null) plugin.arena().release(slot);
         Hud hud = huds.remove(g.id);
         for (UUID id : new ArrayList<>(g.hands.keySet())) {
             Player p = Bukkit.getPlayer(id);
@@ -414,22 +447,21 @@ public class MatchManager {
     }
 
     /**
-     * 修复可能残留的移动异常（掉线/崩服后移速被改低、跳跃力=0、交互距离过大）。
+     * 修复旧版本遗留的属性（只修我们当年写坏的具体值，绝不覆盖其他插件的正常设置）。
+     * 半速 bug 会留下 movement_speed≈0.05，锁定会留下 0；交互距离 6.0 也是旧版写入的。
      * 注意：Bukkit 的 setWalkSpeed(x) 内部把属性存成 x/2，正常速度要用 0.2f。
      */
     public void resetMovement(Player player) {
+        if (!plugin.cfg("game.repair-movement", true)) return;
         AttributeInstance speed = player.getAttribute(Attribute.MOVEMENT_SPEED);
-        if (speed != null && speed.getBaseValue() < 0.09) {
-            player.setWalkSpeed(0.2f);
+        if (speed != null) {
+            double value = speed.getBaseValue();
+            if (value <= 0.0001 || (value > 0.04 && value < 0.06)) player.setWalkSpeed(0.2f);
         }
         AttributeInstance jump = player.getAttribute(Attribute.JUMP_STRENGTH);
-        if (jump != null && jump.getBaseValue() < 0.3) jump.setBaseValue(0.42);
+        if (jump != null && jump.getBaseValue() <= 0.0001) jump.setBaseValue(0.42);
         AttributeInstance reach = player.getAttribute(Attribute.ENTITY_INTERACTION_RANGE);
-        if (reach != null && reach.getBaseValue() > 5.5) reach.setBaseValue(3.0);
-        if ((player.getGameMode() == org.bukkit.GameMode.CREATIVE || player.getGameMode() == org.bukkit.GameMode.SPECTATOR)
-                && !player.getAllowFlight()) {
-            player.setAllowFlight(true);
-        }
+        if (reach != null && reach.getBaseValue() >= 5.9) reach.setBaseValue(3.0);
     }
 
     // ---------- 计时 ----------
@@ -458,9 +490,9 @@ public class MatchManager {
                 continue;
             }
             {
-                String state = g.phase + "|" + g.current() + "|" + g.round + "|" + (g.drawn == null ? 0 : g.drawn.id());
-                if (!state.equals(lastState.get(g.id))) {
-                    lastState.put(g.id, state);
+                Integer last = lastSeq.get(g.id);
+                if (last == null || last != g.turnSeq) {
+                    lastSeq.put(g.id, g.turnSeq);
                     g.deadline = needsAction(g) ? now + seconds(g) * 1000L : 0;
                 }
                 if (g.deadline > 0 && now >= g.deadline) {
@@ -524,11 +556,25 @@ public class MatchManager {
 
     // ---------- 游戏事件 -> 表现 ----------
 
+    /** 轮到某人的提示（标题 + 音效）。 */
+    private void notifyTurn(Game g, UUID player) {
+        if (!games.containsKey(g.id)) return;
+        Player p = Bukkit.getPlayer(player);
+        if (p == null) return;
+        p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.8f, 1.5f);
+        if (plugin.cfg("turn.title", true)) {
+            p.showTitle(Title.title(MineUnoPlugin.mm("<gold><bold>▶ 你的回合"),
+                    MineUnoPlugin.mm("<white>准星选牌 · 左键出牌 · 右键摸牌"), 5, 25, 8));
+        }
+    }
+
     private Game.Events events(Game g) {
         return new Game.Events() {
             @Override
             public void onDeal() {
-                tableOf(g).deal();
+                tableOf(g).deal(() -> {
+                    if (games.containsKey(g.id) && g.phase == Game.Phase.DEALING) g.beginPlay();
+                });
             }
 
             @Override
@@ -567,7 +613,7 @@ public class MatchManager {
                     p.playSound(p.getLocation(), Sound.BLOCK_ANVIL_LAND, 0.7f, 1.4f);
                     if (plugin.cfg("turn.title", true)) {
                         p.showTitle(Title.title(MineUnoPlugin.mm("<red><bold>你被跳过"),
-                                MineUnoPlugin.mm("<gray>本轮失去出牌机会"), 3, 22, 8));
+                                MineUnoPlugin.mm("<gray>本轮失去出牌机会"), 3, 35, 10));
                     }
                 }
             }
@@ -588,15 +634,14 @@ public class MatchManager {
             @Override
             public void onTurn(UUID player) {
                 tableOf(g).onTurn(player);
-                Player p = Bukkit.getPlayer(player);
-                if (p != null) {
-                    p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.8f, 1.5f);
-                    if (plugin.cfg("turn.title", true)) {
-                        p.showTitle(Title.title(MineUnoPlugin.mm("<gold><bold>▶ 你的回合"),
-                                MineUnoPlugin.mm("<white>准星选牌 · 左键出牌 · 右键摸牌"), 5, 25, 8));
-                    }
+                if (tableOf(g).skipAnimating()) {
+                    // 刚有人被跳过：等"被跳过"标识停留结束再提示下家
+                    int delay = plugin.cfg("turn.skip-stay", 30);
+                    schedule(delay, () -> notifyTurn(g, player));
+                } else {
+                    notifyTurn(g, player);
                 }
-                plugin.menus().refresh(p);
+                plugin.menus().refresh(Bukkit.getPlayer(player));
             }
 
             @Override
