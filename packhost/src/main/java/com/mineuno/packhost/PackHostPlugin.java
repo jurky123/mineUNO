@@ -1,11 +1,12 @@
 package com.mineuno.packhost;
 
 import com.sun.net.httpserver.HttpServer;
-import java.io.ByteArrayOutputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.InetSocketAddress;
@@ -13,18 +14,21 @@ import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 import net.kyori.adventure.resource.ResourcePackInfo;
 import net.kyori.adventure.resource.ResourcePackRequest;
@@ -49,14 +53,15 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     private HttpServer server;
     private java.util.concurrent.ExecutorService executor;
-    private File output;
-    private byte[] hash = new byte[0];
-    private String url = "";
+    private volatile File output;
+    private volatile byte[] hash = new byte[0];
+    private volatile String url = "";
+    private int runningPort = -1;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        rebuild();
+        rebuild(false, null);
         startServer();
         getCommand("packhost").setExecutor(this);
         getCommand("packhost").setTabCompleter(this);
@@ -71,103 +76,201 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     // ---------- 合并资源包 ----------
 
-    public void rebuild() {
-        File packsDir = new File(getDataFolder(), "packs");
+    /**
+     * 合并资源包并原子发布。
+     * async=true 时在后台线程构建，主线程只做原子切换（/packhost reload 用）；
+     * 失败时保留旧包不动。
+     */
+    public void rebuild(boolean async, Runnable onDone) {
         File looseDir = new File(getDataFolder(), "pack");
-        packsDir.mkdirs();
+        File packsDir = new File(getDataFolder(), "packs");
         looseDir.mkdirs();
-        output = new File(getDataFolder(), "output/pack.zip");
-        output.getParentFile().mkdirs();
+        packsDir.mkdirs();
+        File out = new File(getDataFolder(), "output/pack.zip");
+        out.getParentFile().mkdirs();
+        output = out;
 
-        Map<String, byte[]> entries = new LinkedHashMap<>();
-        if (!addDirectory(looseDir, looseDir, entries)) {
-            getLogger().severe("散装目录读取失败，已取消本次重建（保留旧资源包）");
-            return;
+        Runnable build = () -> {
+            File temp = new File(out.getParentFile(), "pack.zip.tmp");
+            try {
+                int files = build(temp, looseDir, packsDir);
+                byte[] built = sha1(temp);
+                Runnable publish = () -> {
+                    try {
+                        move(temp, out);
+                    } catch (IOException e) {
+                        getLogger().severe("替换资源包失败，保留旧包: " + e.getMessage());
+                        return;
+                    }
+                    hash = built;
+                    url = "http://" + address() + ":" + getConfig().getInt("port", 8123) + "/pack.zip";
+                    getLogger().info("已合并 " + files + " 个文件 -> " + out.getName() + " (" + out.length() / 1024 + " KB)");
+                    if (onDone != null) onDone.run();
+                };
+                if (async) Bukkit.getScheduler().runTask(this, publish);
+                else publish.run();
+            } catch (IOException e) {
+                getLogger().severe("合并资源包失败，保留旧包: " + e.getMessage());
+            }
+        };
+        if (async) {
+            Bukkit.getScheduler().runTaskAsynchronously(this, build);
+        } else {
+            build.run();
         }
+    }
+
+    private void move(File from, File to) throws IOException {
+        try {
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException atomicFailed) {
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * 两遍构建：先只收集 entry 名单决定归属（散装目录 < 按文件名排序的 zip），再流式写出。
+     * 全程不把包内容整体读进内存。
+     */
+    private int build(File temp, File looseDir, File packsDir) throws IOException {
         File[] zips = packsDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".zip"));
-        if (zips != null) {
-            Arrays.sort(zips, Comparator.comparing(File::getName));
-            for (File zip : zips) addZip(zip, entries);
-        }
-        entries.putIfAbsent("pack.mcmeta", defaultMeta());
+        if (zips == null) zips = new File[0];
+        Arrays.sort(zips, Comparator.comparing(File::getName));
 
-        File temp = new File(output.getParentFile(), "pack.zip.tmp");
-        try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(temp))) {
-            for (Map.Entry<String, byte[]> e : entries.entrySet()) {
-                ZipEntry entry = new ZipEntry(e.getKey());
-                entry.setTime(0);
-                out.putNextEntry(entry);
-                out.write(e.getValue());
-                out.closeEntry();
+        Map<String, Integer> owner = new LinkedHashMap<>();
+        Map<String, Integer> conflicts = new LinkedHashMap<>();
+        Set<Integer> used = new HashSet<>();
+        for (String name : listDir(looseDir, looseDir)) {
+            register(owner, conflicts, name, -1);
+            used.add(-1);
+        }
+        for (int i = 0; i < zips.length; i++) {
+            for (String name : listZip(zips[i])) {
+                register(owner, conflicts, name, i);
+                used.add(i);
+            }
+        }
+        if (conflicts.isEmpty()) {
+            getLogger().info("资源包合并：无同名冲突");
+        } else {
+            String sample = String.join(", ", conflicts.keySet().stream().limit(5).toList());
+            getLogger().warning("资源包合并：有 " + conflicts.size() + " 个同名文件被覆盖（顺序：散装目录 < 按文件名排序的 zip），例如 " + sample);
+        }
+
+        int written = 0;
+        try (ZipOutputStream zipOut = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(temp)))) {
+            if (used.contains(-1)) written += writeDir(looseDir, looseDir, zipOut, owner, -1);
+            for (int i = 0; i < zips.length; i++) {
+                // 损坏/空的 zip 直接跳过，不影响其它资源包合并
+                if (used.contains(i)) written += writeZip(zips[i], zipOut, owner, i);
+            }
+            if (!owner.containsKey("pack.mcmeta")) {
+                writeEntry(zipOut, "pack.mcmeta", defaultMeta());
+                written++;
+            }
+        }
+        return written;
+    }
+
+    private void register(Map<String, Integer> owner, Map<String, Integer> conflicts, String name, int source) {
+        if (owner.containsKey(name)) conflicts.put(name, owner.get(name));
+        owner.put(name, source);
+    }
+
+    private List<String> listDir(File root, File dir) {
+        List<String> names = new ArrayList<>();
+        File[] files = dir.listFiles();
+        if (files == null) return names;
+        for (File f : files) {
+            if (f.isDirectory()) names.addAll(listDir(root, f));
+            else names.add(relative(root, f));
+        }
+        return names;
+    }
+
+    private List<String> listZip(File file) {
+        List<String> names = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(file)) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!entry.isDirectory() && !entry.getName().startsWith("META-INF/")) names.add(entry.getName());
             }
         } catch (IOException e) {
-            getLogger().severe("合并资源包失败: " + e.getMessage());
-            return;
+            getLogger().warning("读取 " + file.getName() + " 失败: " + e.getMessage());
         }
-        // 原子替换，避免下载方读到半成品
-        try {
-            Files.move(temp.toPath(), output.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException atomicFailed) {
-            try {
-                Files.move(temp.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException e) {
-                getLogger().severe("替换资源包失败: " + e.getMessage());
-                return;
+        return names;
+    }
+
+    private int writeZip(File file, ZipOutputStream out, Map<String, Integer> owner, int source) throws IOException {
+        int written = 0;
+        try (ZipFile zip = new ZipFile(file)) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (entry.isDirectory() || entry.getName().startsWith("META-INF/")) continue;
+                if (!Integer.valueOf(source).equals(owner.get(entry.getName()))) continue;
+                out.putNextEntry(entry(entry.getName()));
+                try (InputStream in = zip.getInputStream(entry)) {
+                    in.transferTo(out);
+                }
+                out.closeEntry();
+                written++;
             }
         }
-        hash = sha1(output);
-        url = "http://" + address() + ":" + getConfig().getInt("port", 8123) + "/pack.zip";
-        getLogger().info("已合并 " + entries.size() + " 个文件 -> " + output.getName() + " (" + output.length() / 1024 + " KB)");
+        return written;
+    }
+
+    private int writeDir(File root, File dir, ZipOutputStream out, Map<String, Integer> owner, int source) throws IOException {
+        int written = 0;
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                written += writeDir(root, f, out, owner, source);
+                continue;
+            }
+            String name = relative(root, f);
+            if (!Integer.valueOf(source).equals(owner.get(name))) continue;
+            out.putNextEntry(entry(name));
+            try (InputStream in = Files.newInputStream(f.toPath())) {
+                in.transferTo(out);
+            }
+            out.closeEntry();
+            written++;
+        }
+        return written;
+    }
+
+    private ZipEntry entry(String name) {
+        ZipEntry entry = new ZipEntry(name);
+        entry.setTime(0);
+        return entry;
+    }
+
+    private void writeEntry(ZipOutputStream out, String name, byte[] data) throws IOException {
+        out.putNextEntry(entry(name));
+        out.write(data);
+        out.closeEntry();
     }
 
     private byte[] defaultMeta() {
-        return ("{\"pack\":{\"pack_format\":88,\"supported_formats\":{\"min_inclusive\":1,\"max_inclusive\":999},"
-                + "\"description\":\"PackHost\"}}").getBytes(StandardCharsets.UTF_8);
-    }
-
-    /** root 固定为散装目录本身，所有 entry 都用相对 root 的路径（保留目录结构）。 */
-    private boolean addDirectory(File root, File dir, Map<String, byte[]> entries) {
-        File[] files = dir.listFiles();
-        if (files == null) return true;
-        for (File f : files) {
-            if (f.isDirectory()) {
-                if (!addDirectory(root, f, entries)) return false;
-            } else {
-                try {
-                    entries.put(relative(root, f), Files.readAllBytes(f.toPath()));
-                } catch (IOException e) {
-                    getLogger().warning("读取 " + f.getPath() + " 失败: " + e.getMessage());
-                    return false;
-                }
-            }
-        }
-        return true;
+        return ("{\"pack\":{\"description\":\"PackHost\",\"min_format\":[1,0],\"max_format\":999}}")
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private String relative(File base, File file) {
         return base.toPath().relativize(file.toPath()).toString().replace('\\', '/');
     }
 
-    private void addZip(File zip, Map<String, byte[]> entries) {
-        try (ZipInputStream in = new ZipInputStream(new FileInputStream(zip))) {
-            ZipEntry entry;
-            while ((entry = in.getNextEntry()) != null) {
-                if (entry.isDirectory() || entry.getName().startsWith("META-INF/")) continue;
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                in.transferTo(buffer);
-                entries.put(entry.getName(), buffer.toByteArray());
-            }
-        } catch (IOException e) {
-            getLogger().warning("读取 " + zip.getName() + " 失败: " + e.getMessage());
-        }
-    }
-
+    /** 流式计算 SHA-1，不把整包读进内存。 */
     private byte[] sha1(File file) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
-            return digest.digest(Files.readAllBytes(file.toPath()));
+        try (DigestInputStream in = new DigestInputStream(Files.newInputStream(file.toPath()),
+                MessageDigest.getInstance("SHA-1"))) {
+            in.transferTo(OutputStream.nullOutputStream());
+            return in.getMessageDigest().digest();
         } catch (Exception e) {
+            getLogger().warning("计算资源包摘要失败: " + e.getMessage());
             return new byte[0];
         }
     }
@@ -197,13 +300,32 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         try {
             server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
             server.createContext("/pack.zip", exchange -> {
-                byte[] data = output.exists() ? Files.readAllBytes(output.toPath()) : new byte[0];
+                File file = output;
+                if (file == null || !file.exists()) {
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                    return;
+                }
+                byte[] current = hash;
+                String etag = current.length == 0 ? "" : "\"" + hex(current) + "\"";
+                if (!etag.isEmpty()) {
+                    exchange.getResponseHeaders().set("ETag", etag);
+                    if (etag.equals(exchange.getRequestHeaders().getFirst("If-None-Match"))) {
+                        exchange.sendResponseHeaders(304, -1);
+                        exchange.close();
+                        return;
+                    }
+                }
                 exchange.getResponseHeaders().set("Content-Type", "application/zip");
                 if ("HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
                     exchange.sendResponseHeaders(200, -1);
-                } else {
-                    exchange.sendResponseHeaders(200, data.length);
-                    exchange.getResponseBody().write(data);
+                    exchange.close();
+                    return;
+                }
+                exchange.sendResponseHeaders(200, file.length());
+                try (InputStream in = Files.newInputStream(file.toPath());
+                     OutputStream out = exchange.getResponseBody()) {
+                    in.transferTo(out);
                 }
                 exchange.close();
             });
@@ -217,6 +339,7 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
             executor = Executors.newFixedThreadPool(2);
             server.setExecutor(executor);
             server.start();
+            runningPort = port;
         } catch (IOException e) {
             getLogger().severe("HTTP 服务启动失败: " + e.getMessage());
         }
@@ -289,11 +412,17 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         String sub = args.length == 0 ? "status" : args[0].toLowerCase();
         switch (sub) {
             case "reload" -> {
+                int oldPort = runningPort;
                 reloadConfig();
-                rebuild();
-                startServer();
-                for (Player p : Bukkit.getOnlinePlayers()) send(p);
-                sender.sendMessage("PackHost 已重载：" + url);
+                if (getConfig().getInt("port", 8123) != oldPort) {
+                    startServer();
+                    sender.sendMessage("端口已变更，HTTP 服务已重启");
+                }
+                rebuild(true, () -> {
+                    for (Player p : Bukkit.getOnlinePlayers()) send(p);
+                    sender.sendMessage("PackHost 已重载：" + url);
+                });
+                sender.sendMessage("正在后台重建资源包…（失败会保留旧包）");
             }
             case "url" -> sender.sendMessage(url);
             case "status" -> sender.sendMessage("PackHost: " + url + " | " + (output != null && output.exists() ? output.length() / 1024 + " KB" : "无资源包"));

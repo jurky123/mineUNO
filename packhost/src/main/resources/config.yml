@@ -1,6 +1,8 @@
 # PackHost 配置
 # 把任意数量的资源包 zip 放进 plugins/PackHost/packs/ 即可，会按文件名顺序合并成一个大包。
-# 也可以把散装文件放进 plugins/PackHost/pack/（assets/... 目录结构），散装文件优先级最低。
+# 合并顺序（同名文件后者覆盖前者）：pack/ 散装目录 < packs/*.zip（按文件名排序）；
+# 出现同名冲突时会在控制台打印被覆盖的文件名，便于排查不同资源包之间的冲突。
+# 也可以把散装文件放进 plugins/PackHost/pack/（assets/... 目录结构）。
 
 port: 8123
 # 公网地址（客户端从这个地址下载材质包）。留空则自动探测本机 IP。
