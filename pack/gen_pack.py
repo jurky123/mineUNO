@@ -236,10 +236,11 @@ def main():
     for texture in textures:
         item_defs(texture, texture)
 
+    # 26.2 资源包格式为 88.0（data 107）；新规范必须用 min_format/max_format 且 >= 65
     write_json(os.path.join(SRC, "pack.mcmeta"), {"pack": {
-        "pack_format": 88,
-        "supported_formats": {"min_inclusive": 1, "max_inclusive": 999},
         "description": "MineUNO 材质包（自定义卡牌与桌面）",
+        "min_format": [88, 0],
+        "max_format": 88,
     }})
 
     os.makedirs(OUT, exist_ok=True)
