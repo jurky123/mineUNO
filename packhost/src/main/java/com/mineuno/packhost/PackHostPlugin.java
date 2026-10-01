@@ -13,7 +13,6 @@ import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -53,14 +52,19 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     private HttpServer server;
     private java.util.concurrent.ExecutorService executor;
-    private volatile File output;
-    private volatile byte[] hash = new byte[0];
+    private final Object lifecycle = new Object();
+    private java.util.concurrent.ExecutorService builds;
+    private volatile boolean stopping;
+    private PublishedPack output;
     private volatile String url = "";
     private int runningPort = -1;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        stopping = false;
+        output = new PublishedPack(new File(getDataFolder(), "output/pack.zip").toPath());
+        builds = Executors.newSingleThreadExecutor();
         rebuild(false, null);
         startServer();
         getCommand("packhost").setExecutor(this);
@@ -71,6 +75,10 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     @Override
     public void onDisable() {
+        synchronized (lifecycle) {
+            stopping = true;
+            if (builds != null) builds.shutdownNow();
+        }
         stopServer();
     }
 
@@ -78,7 +86,7 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
 
     /**
      * 合并资源包并原子发布。
-     * async=true 时在后台线程构建，主线程只做原子切换（/packhost reload 用）；
+     * async=true 时串行在后台线程构建、原子发布，主线程下发通知（/packhost reload 用）；
      * 失败时保留旧包不动。
      */
     public void rebuild(boolean async, Runnable onDone) {
@@ -86,45 +94,45 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         File packsDir = new File(getDataFolder(), "packs");
         looseDir.mkdirs();
         packsDir.mkdirs();
-        File out = new File(getDataFolder(), "output/pack.zip");
-        out.getParentFile().mkdirs();
-        output = out;
-
+        File directory = new File(getDataFolder(), "output");
+        directory.mkdirs();
+        // 配置只在调用线程读取；后台任务不访问 Bukkit 配置或玩家。
+        String builtUrl = "http://" + address() + ":" + getConfig().getInt("port", 8123) + "/pack.zip";
         Runnable build = () -> {
-            File temp = new File(out.getParentFile(), "pack.zip.tmp");
+            java.nio.file.Path temp = null;
             try {
-                int files = build(temp, looseDir, packsDir);
-                byte[] built = sha1(temp);
-                Runnable publish = () -> {
-                    try {
-                        move(temp, out);
-                    } catch (IOException e) {
-                        getLogger().severe("替换资源包失败，保留旧包: " + e.getMessage());
-                        return;
+                if (stopping || Thread.currentThread().isInterrupted()) return;
+                temp = Files.createTempFile(directory.toPath(), "pack-", ".zip.tmp");
+                int files = build(temp.toFile(), looseDir, packsDir);
+                byte[] built = sha1(temp.toFile());
+                synchronized (lifecycle) {
+                    if (stopping || Thread.currentThread().isInterrupted()) return;
+                    output.publish(temp, built);
+                    url = builtUrl;
+                    getLogger().info("已合并 " + files + " 个文件 -> pack.zip (" + output.length() / 1024 + " KB)");
+                    if (onDone != null) {
+                        if (async) Bukkit.getScheduler().runTask(this, () -> {
+                            if (!stopping) onDone.run();
+                        });
+                        else onDone.run();
                     }
-                    hash = built;
-                    url = "http://" + address() + ":" + getConfig().getInt("port", 8123) + "/pack.zip";
-                    getLogger().info("已合并 " + files + " 个文件 -> " + out.getName() + " (" + out.length() / 1024 + " KB)");
-                    if (onDone != null) onDone.run();
-                };
-                if (async) Bukkit.getScheduler().runTask(this, publish);
-                else publish.run();
+                }
             } catch (IOException e) {
                 getLogger().severe("合并资源包失败，保留旧包: " + e.getMessage());
+            } finally {
+                if (temp != null) {
+                    try {
+                        Files.deleteIfExists(temp);
+                    } catch (IOException e) {
+                        getLogger().warning("清理临时资源包失败: " + e.getMessage());
+                    }
+                }
             }
         };
-        if (async) {
-            Bukkit.getScheduler().runTaskAsynchronously(this, build);
-        } else {
-            build.run();
-        }
-    }
-
-    private void move(File from, File to) throws IOException {
-        try {
-            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException atomicFailed) {
-            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        synchronized (lifecycle) {
+            if (stopping) return;
+            if (async) builds.execute(build);
+            else build.run();
         }
     }
 
@@ -264,14 +272,13 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
     }
 
     /** 流式计算 SHA-1，不把整包读进内存。 */
-    private byte[] sha1(File file) {
+    private byte[] sha1(File file) throws IOException {
         try (DigestInputStream in = new DigestInputStream(Files.newInputStream(file.toPath()),
                 MessageDigest.getInstance("SHA-1"))) {
             in.transferTo(OutputStream.nullOutputStream());
             return in.getMessageDigest().digest();
         } catch (Exception e) {
-            getLogger().warning("计算资源包摘要失败: " + e.getMessage());
-            return new byte[0];
+            throw new IOException("计算资源包摘要失败", e);
         }
     }
 
@@ -300,34 +307,30 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
         try {
             server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
             server.createContext("/pack.zip", exchange -> {
-                File file = output;
-                if (file == null || !file.exists()) {
-                    exchange.sendResponseHeaders(404, -1);
-                    exchange.close();
-                    return;
-                }
-                byte[] current = hash;
-                String etag = current.length == 0 ? "" : "\"" + hex(current) + "\"";
-                if (!etag.isEmpty()) {
+                try (PublishedPack.Download pack = output.open()) {
+                    if (pack == null) {
+                        exchange.sendResponseHeaders(404, -1);
+                        return;
+                    }
+                    String etag = "\"" + hex(pack.hash()) + "\"";
                     exchange.getResponseHeaders().set("ETag", etag);
                     if (etag.equals(exchange.getRequestHeaders().getFirst("If-None-Match"))) {
                         exchange.sendResponseHeaders(304, -1);
-                        exchange.close();
                         return;
                     }
-                }
-                exchange.getResponseHeaders().set("Content-Type", "application/zip");
-                if ("HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
-                    exchange.sendResponseHeaders(200, -1);
+                    exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                    if ("HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
+                        exchange.getResponseHeaders().set("Content-Length", Long.toString(pack.length()));
+                        exchange.sendResponseHeaders(200, -1);
+                        return;
+                    }
+                    exchange.sendResponseHeaders(200, pack.length());
+                    try (OutputStream out = exchange.getResponseBody()) {
+                        pack.input().transferTo(out);
+                    }
+                } finally {
                     exchange.close();
-                    return;
                 }
-                exchange.sendResponseHeaders(200, file.length());
-                try (InputStream in = Files.newInputStream(file.toPath());
-                     OutputStream out = exchange.getResponseBody()) {
-                    in.transferTo(out);
-                }
-                exchange.close();
             });
             server.createContext("/", exchange -> {
                 byte[] body = ("PackHost\n" + url + "\n").getBytes(StandardCharsets.UTF_8);
@@ -359,12 +362,18 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
     // ---------- 下发 ----------
 
     public void send(Player player) {
-        if (url.isEmpty()) return;
+        String currentUrl;
+        byte[] currentHash;
+        synchronized (lifecycle) {
+            currentUrl = url;
+            currentHash = output.hash();
+        }
+        if (currentUrl.isEmpty() || currentHash.length == 0) return;
         boolean required = getConfig().getBoolean("required", false);
         String prompt = getConfig().getString("prompt", "<gold>服务器材质包");
         player.sendResourcePacks(ResourcePackRequest.resourcePackRequest()
-                .packs(ResourcePackInfo.resourcePackInfo(PACK_ID, URI.create(url),
-                        hash.length == 0 ? "" : hex(hash)))
+                .packs(ResourcePackInfo.resourcePackInfo(PACK_ID, URI.create(currentUrl),
+                        hex(currentHash)))
                 .required(required)
                 .prompt(MiniMessage.miniMessage().deserialize(prompt))
                 .build());
@@ -425,7 +434,7 @@ public final class PackHostPlugin extends JavaPlugin implements Listener, Comman
                 sender.sendMessage("正在后台重建资源包…（失败会保留旧包）");
             }
             case "url" -> sender.sendMessage(url);
-            case "status" -> sender.sendMessage("PackHost: " + url + " | " + (output != null && output.exists() ? output.length() / 1024 + " KB" : "无资源包"));
+            case "status" -> sender.sendMessage("PackHost: " + url + " | " + (output != null && output.length() > 0 ? output.length() / 1024 + " KB" : "无资源包"));
             case "send" -> {
                 if (args.length < 2) {
                     sender.sendMessage("用法：/packhost send <玩家>");

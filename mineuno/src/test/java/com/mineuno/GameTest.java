@@ -212,6 +212,126 @@ class GameTest {
         assertEquals(Game.Phase.ENDED, challenge.phase);
     }
 
+    @Test
+    void unrelatedForfeitPreservesPendingDecisionsInBothDirections() {
+        for (int direction : List.of(1, -1)) {
+            for (int owner = 0; owner < 3; owner++) {
+                for (Game.Phase pending : List.of(Game.Phase.PICK_COLOR, Game.Phase.CHALLENGE, Game.Phase.POST_DRAW)) {
+                    Game g = game(3, Game.Mode.QUICK);
+                    g.turn = owner;
+                    g.dir = direction;
+                    UUID actor = g.current();
+                    UUID leaver = g.next(2);
+                    if (pending == Game.Phase.POST_DRAW) {
+                        g.phase = pending;
+                        g.drawn = g.hand(actor).get(0);
+                    } else {
+                        Card wild4 = card(Card.Color.WILD, Card.Type.WILD4, -1);
+                        g.hand(actor).add(wild4);
+                        assertTrue(g.play(actor, wild4.id()));
+                        if (pending == Game.Phase.CHALLENGE) {
+                            assertTrue(g.chooseColor(actor, Card.Color.BLUE));
+                        }
+                    }
+                    Card drawn = g.drawn;
+                    UUID challenger = g.w4challenger;
+                    int cards = g.hand(actor).size();
+                    int seq = g.turnSeq;
+                    g.deadline = 12345;
+                    g.forfeit(leaver);
+                    assertEquals(pending, g.phase);
+                    assertEquals(actor, g.current());
+                    assertEquals(cards, g.hand(actor).size());
+                    assertEquals(drawn, g.drawn);
+                    assertEquals(challenger, g.w4challenger);
+                    assertEquals(seq, g.turnSeq);
+                    assertEquals(12345, g.deadline);
+                    if (pending == Game.Phase.PICK_COLOR) assertTrue(g.chooseColor(actor, Card.Color.GREEN));
+                    if (pending == Game.Phase.CHALLENGE) assertTrue(g.acceptWild4(challenger));
+                    if (pending == Game.Phase.POST_DRAW) assertTrue(g.pass(actor));
+                }
+            }
+        }
+    }
+
+    @Test
+    void departingWild4OwnerFinesAndSkipsActualSuccessor() {
+        for (int direction : List.of(1, -1)) {
+            for (int owner = 0; owner < 3; owner++) {
+                for (boolean choseColor : List.of(false, true)) {
+                    Game g = game(3, Game.Mode.QUICK);
+                    g.turn = owner;
+                    g.dir = direction;
+                    UUID actor = g.current();
+                    UUID victim = g.next(1);
+                    UUID successor = g.next(2);
+                    int before = g.hand(victim).size();
+                    Card wild4 = card(Card.Color.WILD, Card.Type.WILD4, -1);
+                    g.hand(actor).add(wild4);
+                    assertTrue(g.play(actor, wild4.id()));
+                    if (choseColor) assertTrue(g.chooseColor(actor, Card.Color.BLUE));
+                    g.forfeit(actor);
+                    assertEquals(before + 4, g.hand(victim).size());
+                    assertEquals(successor, g.current());
+                    assertEquals(Game.Phase.PLAYING, g.phase);
+                }
+            }
+        }
+    }
+
+    @Test
+    void departingChallengerTransfersPenaltyInBothDirections() {
+        for (int direction : List.of(1, -1)) {
+            for (int owner = 0; owner < 3; owner++) {
+                Game g = game(3, Game.Mode.QUICK);
+                g.turn = owner;
+                g.dir = direction;
+                UUID actor = g.current();
+                UUID challenger = g.next(1);
+                UUID victim = g.next(2);
+                int before = g.hand(victim).size();
+                Card wild4 = card(Card.Color.WILD, Card.Type.WILD4, -1);
+                g.hand(actor).add(wild4);
+                assertTrue(g.play(actor, wild4.id()));
+                assertTrue(g.chooseColor(actor, Card.Color.BLUE));
+                g.forfeit(challenger);
+                assertEquals(before + 4, g.hand(victim).size());
+                assertEquals(actor, g.current());
+                assertEquals(Game.Phase.PLAYING, g.phase);
+            }
+        }
+    }
+
+    @Test
+    void lastWild4ForfeitAppliesPenaltyBeforeScoringEvenWithTwoPlayers() {
+        for (int players : List.of(2, 3)) {
+            Game g = game(players, Game.Mode.CLASSIC);
+            g.turn = 0;
+            g.hand(A).clear();
+            Card wild4 = card(Card.Color.WILD, Card.Type.WILD4, -1);
+            g.hand(A).add(wild4);
+            for (UUID other : g.order()) {
+                if (!other.equals(A)) {
+                    g.hand(other).clear();
+                    g.hand(other).add(card(Card.Color.RED, Card.Type.NUMBER, 1));
+                }
+            }
+            g.draw.clear();
+            for (int i = 0; i < 4; i++) g.draw.add(card(Card.Color.BLUE, Card.Type.NUMBER, 2));
+            List<UUID> winners = new ArrayList<>();
+            g.events = new Game.Events() {
+                @Override public void onRoundEnd(UUID winner) { winners.add(winner); }
+                @Override public void onMatchEnd(UUID winner) { winners.add(winner); }
+            };
+            assertTrue(g.play(A, wild4.id()));
+            g.forfeit(A);
+            assertEquals(5, g.hand(B).size());
+            assertEquals(players - 1 + 8, g.scores.get(A));
+            assertEquals(players == 2 ? List.of(A, A) : List.of(A), winners);
+            assertEquals(players == 2 ? Game.Phase.ENDED : Game.Phase.ROUND_END, g.phase);
+        }
+    }
+
     // ---------- 计时序号 ----------
 
     @Test

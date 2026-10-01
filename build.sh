@@ -8,8 +8,10 @@ mvn -q -B -f packhost/pom.xml package
 python3 pack/gen_pack.py
 
 mkdir -p out
-cp mineuno/target/MineUNO-*.jar out/
-cp packhost/target/PackHost-*.jar out/
+UNO_VERSION=$(awk -F'[<>]' '/^  <version>/{print $3; exit}' mineuno/pom.xml)
+PACK_VERSION=$(awk -F'[<>]' '/^  <version>/{print $3; exit}' packhost/pom.xml)
+cp "mineuno/target/MineUNO-$UNO_VERSION.jar" out/
+cp "packhost/target/PackHost-$PACK_VERSION.jar" out/
 cp pack/out/mineuno.zip out/
 
 echo "构建完成，产物："

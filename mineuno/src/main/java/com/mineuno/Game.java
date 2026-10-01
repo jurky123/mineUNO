@@ -488,61 +488,56 @@ public class Game {
 
     public void forfeit(UUID player) {
         if (!hands.containsKey(player)) return;
+        boolean finishedWild = phase == Phase.PICK_COLOR && player.equals(current()) && wildWasLast;
+        // 仍在座时结算出牌者的选择，保留正确的下家、罚牌与最后一张牌计分。
+        if (phase == Phase.PICK_COLOR && player.equals(current())) {
+            chooseColor(player, bestColor(player));
+        }
+        if (phase == Phase.CHALLENGE && player.equals(w4offender)) {
+            acceptWild4(w4challenger);
+        }
+        boolean currentLeft = player.equals(current());
         int index = order().indexOf(player);
         List<Card> hand = hands.remove(player);
         draw.addAll(hand);
         Collections.shuffle(draw, rnd);
         ready.remove(player);
         away.remove(player);
+        if (player.equals(vulnerable)) vulnerable = null;
+        if (player.equals(armed)) armed = null;
         if (player.equals(host)) host = hands.keySet().stream().findFirst().orElse(null);
+        if (index < turn) {
+            turn--;
+        } else if (index == turn && dir < 0 && count() > 0) {
+            // 逆序时继任者是数组里前一位
+            turn = rel(turn - 1);
+        }
+        if (count() > 0) turn = rel(turn);
+        // 已结算的最后一张 Wild 不可再将胜者改成剩余玩家。
+        if (phase == Phase.ROUND_END || phase == Phase.ENDED) {
+            if (finishedWild && phase == Phase.ROUND_END && count() <= 1) endMatch(player);
+            return;
+        }
         if (count() <= 1) {
             endMatch(current());
             return;
         }
-        if (index < turn) {
-            turn--;
-        } else if (index == turn && dir < 0) {
-            // 逆序时继任者是数组里前一位
-            turn = rel(turn - 1);
-        }
-        turn = rel(turn);
-        UUID cur = current();
-        if (phase == Phase.PICK_COLOR) {
-            Card played = top();
-            if (wildWasLast) {
-                // 出牌者用最后一张 Wild/Wild4 走完：离开也算本局赢家，不能被下家顶替
-                endRound(player);
-            } else {
-                activeColor = bestColor(cur);
-                phase = Phase.PLAYING;
-                events.onColor(activeColor);
-                if (played != null && played.type() == Card.Type.WILD4) {
-                    give(cur, 4);
-                    events.onSkip(cur);
-                    advance(1);
-                }
-                events.onTurn(current());
-            }
-        } else if (phase == Phase.CHALLENGE) {
-            if (player.equals(w4challenger)) {
-                // 质疑者退出：视为接受，由下一位承担 +4
-                w4offender = w4challenger = null;
-                phase = Phase.PLAYING;
-                UUID victim = next(1);
-                give(victim, 4);
-                events.onSkip(victim);
-                advance(2);
-                events.onTurn(current());
-            } else {
-                acceptWild4(w4challenger);
-            }
-        } else if (phase == Phase.POST_DRAW) {
-            // 摸牌决策中退出：清掉待决策状态，让下家正常出牌
+        if (phase == Phase.CHALLENGE && player.equals(w4challenger)) {
+            // 质疑者退出：视为接受，由下一位承担 +4。
+            w4offender = w4challenger = null;
+            phase = Phase.PLAYING;
+            UUID victim = next(1);
+            give(victim, 4);
+            events.onSkip(victim);
+            advance(2);
+            events.onTurn(current());
+        } else if (currentLeft && (phase == Phase.POST_DRAW || phase == Phase.PLAYING)) {
             drawn = null;
             phase = Phase.PLAYING;
-            events.onTurn(cur);
-        } else if (phase == Phase.PLAYING) {
-            events.onTurn(cur);
+            deadline = 0;
+            turnSeq++;
+            events.onTurn(current());
         }
+        // 无关玩家离开仅重排座位，不重置其他人的决策或计时。
     }
 }

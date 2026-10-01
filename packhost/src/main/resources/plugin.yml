@@ -1,5 +1,5 @@
 name: PackHost
-version: '1.0.0'
+version: '1.0.1'
 main: com.mineuno.packhost.PackHostPlugin
 api-version: '26.2'
 description: 通用材质包管理：合并多个资源包并通过内置 HTTP 服务下发给客户端
