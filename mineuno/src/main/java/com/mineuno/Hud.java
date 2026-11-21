@@ -49,11 +49,17 @@ public class Hud {
         long remain = game.deadline <= 0 ? 0 : Math.max(0, (game.deadline - System.currentTimeMillis() + 999) / 1000);
         int total = Math.max(1, seconds(game.phase));
         UUID cur = game.current();
-        String turn = cur == null ? "<gray>等待中" : "<white>" + name(cur) + " <gray>的回合";
+        String phaseText = switch (game.phase) {
+            case PICK_COLOR -> " <gold>(选色中)";
+            case CHALLENGE -> " <red>(+4 质疑中)";
+            default -> "";
+        };
+        String turn = cur == null ? "<gray>等待中" : "<white>" + name(cur) + " <gray>的回合" + phaseText;
         Card top = game.top();
         String last = top == null ? "<dark_gray>—" : top.coloredName();
+        String timeTag = remain <= 5 && game.deadline > 0 ? "<red><bold>" + remain + "s" : "<white>" + remain + "s";
         bar.name(MineUnoPlugin.mm(turn + " <dark_gray>| <" + game.activeColor.tag + ">" + game.activeColor.cn
-                + " <dark_gray>| <white>" + remain + "s <dark_gray>| <gray>上一张 " + last
+                + " <dark_gray>| " + timeTag + " <dark_gray>| <gray>上一张 " + last
                 + " <dark_gray>| " + (game.dir > 0 ? "<white>↻" : "<white>↺")));
         bar.color(color());
         bar.progress(game.deadline <= 0 ? 1f : Math.min(1f, remain / (float) total));
@@ -67,25 +73,39 @@ public class Hud {
 
     private String actionBar(Player player) {
         UUID id = player.getUniqueId();
-        if (game.phase == Game.Phase.CHALLENGE && id.equals(game.w4challenger)) {
+        if (game.phase == Game.Phase.CHALLENGE) {
             long remain = game.deadline <= 0 ? 0 : Math.max(0, (game.deadline - System.currentTimeMillis() + 999) / 1000);
-            return "<red>" + name(game.w4offender) + " 对你使用了 +4 <dark_gray>| <white>接受或质疑 <gray>(" + remain + "s)";
+            if (id.equals(game.w4challenger)) {
+                return "<red><bold>" + name(game.w4offender) + " 对你使用了 +4 <dark_gray>| <white>接受或质疑 <gray>(" + remain + "s)";
+            }
+            return "<gray>等待 <white>" + name(game.w4challenger) + " <gray>决定是否质疑 +4 <dark_gray>| <white>手牌 ×" + game.hand(id).size();
+        }
+        if (game.phase == Game.Phase.PICK_COLOR) {
+            if (id.equals(game.current())) {
+                return "<gold><bold>请选择颜色 <dark_gray>| <gray>点击选色界面中的红/黄/绿/蓝";
+            }
+            return "<gray>等待 <white>" + name(game.current()) + " <gray>选择颜色 <dark_gray>| <white>手牌 ×" + game.hand(id).size();
         }
         if (id.equals(game.current()) && (game.phase == Game.Phase.PLAYING || game.phase == Game.Phase.POST_DRAW)) {
             if (game.phase == Game.Phase.POST_DRAW) return "<yellow>摸到了 <white>" + (game.drawn == null ? "?" : game.drawn.name())
                     + " <dark_gray>| <white>左键出牌 · 潜行+左键结束回合";
             return "<green>轮到你 <dark_gray>| <white>准星选牌 → 左键出牌 · 右键摸牌";
         }
+        int handSize = game.hand(id).size();
+        if (id.equals(game.vulnerable)) {
+            return "<red><bold>⚠ 你忘喊 UNO 了！<white>快输入 <yellow>/uno uno <white>或点面板补喊";
+        }
+        if (game.vulnerable != null) {
+            return "<gold>⚡ " + name(game.vulnerable) + " 剩 1 张没喊 UNO！<white>可输入 <yellow>/uno catch " + name(game.vulnerable);
+        }
         StringBuilder sb = new StringBuilder();
-        if (game.hands.get(id).size() == 1 && id.equals(game.vulnerable)) {
-            sb.append("<red>⚠ 你只剩 1 张牌，快喊 /uno uno！");
-        } else if (id.equals(game.vulnerable)) {
-            sb.append("<gray>你已喊过 UNO");
+        if (handSize == 1) {
+            sb.append("<green>✔ 你已喊过 UNO");
         } else {
             sb.append("<gray>等待 <white>").append(name(game.current())).append(" <gray>出牌");
-            sb.append(" <dark_gray>| <white>手牌 ×").append(game.hand(id).size());
-            sb.append(" <dark_gray>| <white>牌堆 ×").append(game.draw.size());
         }
+        sb.append(" <dark_gray>| <white>手牌 ×").append(handSize);
+        sb.append(" <dark_gray>| <white>牌堆 ×").append(game.draw.size());
         return sb.toString();
     }
 }

@@ -51,9 +51,16 @@ public class Menus {
         ItemStack stack = ItemStack.of(material);
         stack.editMeta(meta -> {
             meta.displayName(MineUnoPlugin.mm(name).decoration(TextDecoration.ITALIC, false));
-            meta.lore(lore.stream().map(MineUnoPlugin::mm).toList());
+            meta.lore(lore.stream().map(line -> MineUnoPlugin.mm(line).decoration(TextDecoration.ITALIC, false)).toList());
         });
         return stack;
+    }
+
+    private static void fillEmpty(Inventory inv, Material material, int from, int to) {
+        ItemStack pane = item(material, " ", List.of());
+        for (int i = from; i <= to && i < inv.getSize(); i++) {
+            if (inv.getItem(i) == null) inv.setItem(i, pane);
+        }
     }
 
     // ---------- 规则与教程 ----------
@@ -180,22 +187,33 @@ public class Menus {
                                 "<gray>/uno setarena [编号] 设置牌桌（OP）· /uno list 房间列表"))));
     }
 
+    private static final String[] RULE_TOPICS = {
+            "基础规则", "功能牌介绍", "喊 UNO 与抓人", "+4 质疑规则", "模式与计分", "操作与命令"
+    };
+
     public void openRules(Player player, int page) {
         int pages = RULES.size();
         page = Math.max(0, Math.min(pages - 1, page));
         rulePages.put(player.getUniqueId(), page);
-        Inventory inv = create("rules", null, 6, "<gold><bold>MineUNO</bold> <gray>规则与教程");
-        inv.setItem(4, item(Material.BOOK, "<yellow><bold>第 " + (page + 1) + " / " + pages + " 页", List.of(
-                "<gray>点击下方箭头翻页")));
+        Inventory inv = create("rules", null, 6, "<gold><bold>MineUNO</bold> <dark_gray>· 规则与教程");
+        String topic = page < RULE_TOPICS.length ? RULE_TOPICS[page] : "";
+        inv.setItem(4, item(Material.BOOK, "<yellow><bold>第 " + (page + 1) + " / " + pages + " 页 <gray>· <white>" + topic,
+                List.of("<gray>点击底部箭头翻阅规则")));
         List<Rule> rules = RULES.get(page);
         int[] slots = {19, 20, 21, 22, 23, 24, 25};
         for (int i = 0; i < rules.size() && i < slots.length; i++) {
             Rule rule = rules.get(i);
             inv.setItem(slots[i], item(rule.material(), rule.name(), rule.lore()));
         }
-        inv.setItem(45, item(Material.ARROW, "<white>上一页", List.of()));
+        inv.setItem(45, page > 0
+                ? item(Material.ARROW, "<white>上一页", List.of("<gray>前往第 " + page + " 页"))
+                : item(Material.GRAY_STAINED_GLASS_PANE, "<gray>已是第一页", List.of()));
         inv.setItem(49, item(Material.BARRIER, "<red>关闭", List.of()));
-        inv.setItem(53, item(Material.ARROW, "<white>下一页", List.of()));
+        inv.setItem(53, page < pages - 1
+                ? item(Material.ARROW, "<white>下一页", List.of("<gray>前往第 " + (page + 2) + " 页"))
+                : item(Material.GRAY_STAINED_GLASS_PANE, "<gray>已是最后一页", List.of()));
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 0, 8);
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 45, 53);
         later(player, () -> player.openInventory(inv));
     }
 
@@ -205,32 +223,40 @@ public class Menus {
         List<Game> rooms = new ArrayList<>(plugin.matches().games());
         Inventory inv = Bukkit.createInventory(
                 new Holder("main", null, rooms.stream().map(room -> room.id).toList()),
-                27, MineUnoPlugin.mm("<gold><bold>MineUNO</bold> <gray>大厅"));
+                27, MineUnoPlugin.mm("<gold><bold>MineUNO</bold> <dark_gray>· 大厅"));
         inv.setItem(4, item(Material.BOOK, "<yellow><bold>规则与教程",
                 List.of("<gray>玩法 / 功能牌 / UNO / 质疑 / 操作")));
         inv.setItem(11, item(Material.LIME_CONCRETE, "<green><bold>创建房间 · Quick",
-                List.of("<gray>第一个出完手牌的人获胜", "<yellow>点击创建")));
+                List.of("<gray>第一个出完手牌的人获胜", "<yellow>▶ 点击创建")));
         inv.setItem(13, item(Material.RED_CONCRETE, "<red><bold>创建房间 · Classic 500",
-                List.of("<gray>官方计分，先到 500 分者获胜", "<yellow>点击创建")));
-        inv.setItem(15, item(Material.CLOCK, "<white>刷新列表", List.of("<gray>重新载入房间列表")));
-        int slot = 18;
-        for (Game game : rooms) {
-            if (slot > 26) break;
-            inv.setItem(slot++, gameIcon(game));
+                List.of("<gray>官方计分，先到 500 分者获胜", "<yellow>▶ 点击创建")));
+        inv.setItem(15, item(Material.CLOCK, "<aqua>刷新列表", List.of("<gray>重新载入当前房间")));
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 0, 17);
+        if (rooms.isEmpty()) {
+            inv.setItem(22, item(Material.PAPER, "<gray>暂无房间",
+                    List.of("<gray>点击上方按钮创建 Quick 或 Classic 500 房间")));
+        } else {
+            int slot = 18;
+            for (Game game : rooms) {
+                if (slot > 26) break;
+                inv.setItem(slot++, gameIcon(game));
+            }
         }
         later(player, () -> player.openInventory(inv));
     }
 
     private ItemStack gameIcon(Game game) {
         boolean waiting = game.phase == Game.Phase.WAITING;
+        boolean full = game.count() >= game.maxPlayers;
         List<String> lore = new ArrayList<>(List.of(
                 "<gray>模式：<white>" + game.mode.label,
                 "<gray>人数：<white>" + game.count() + "/" + game.maxPlayers,
-                "<gray>状态：<white>" + (waiting ? "等待中" : "游戏中"),
+                "<gray>状态：" + (!waiting ? "<red>游戏中" : full ? "<gold>房间已满" : "<green>等待中"),
                 "<gray>房主：<white>" + name(game.host)));
-        lore.add(waiting ? "<yellow>点击加入" : "<red>游戏已开始");
-        return item(waiting ? Material.WHITE_WOOL : Material.RED_WOOL,
-                (waiting ? "<white>" : "<gray>") + game.name, lore);
+        lore.add(!waiting ? "<gray>游戏已开始" : full ? "<gray>当前人数已满" : "<yellow>▶ 点击加入");
+        Material mat = !waiting ? Material.RED_WOOL : full ? Material.YELLOW_WOOL : Material.LIME_WOOL;
+        String titleColor = !waiting ? "<gray>" : full ? "<gold><bold>" : "<green><bold>";
+        return item(mat, titleColor + game.name, lore);
     }
 
     private String name(UUID id) {
@@ -242,35 +268,46 @@ public class Menus {
     // ---------- 房间 ----------
 
     public void openLobby(Player player, Game game) {
-        Inventory inv = create("lobby", game.id, 3, "<gold>" + game.name + " <gray>· " + game.mode.label);
+        Inventory inv = create("lobby", game.id, 3, "<gold><bold>" + game.name + "</bold> <dark_gray>· " + game.mode.label);
         int slot = 0;
         for (UUID id : game.order()) {
+            if (slot >= 18) break;
             boolean ready = game.ready.contains(id);
+            boolean isSelf = id.equals(player.getUniqueId());
+            int seat = slot + 1;
             ItemStack head = ItemStack.of(Material.PLAYER_HEAD);
             head.editMeta(SkullMeta.class, meta -> {
                 meta.setOwningPlayer(Bukkit.getOfflinePlayer(id));
                 meta.displayName(MineUnoPlugin.mm("<white>" + name(id)
-                        + (id.equals(game.host) ? " <gold>[房主]" : "")).decoration(TextDecoration.ITALIC, false));
-                meta.lore(List.of(MineUnoPlugin.mm(ready ? "<green>✔ 已准备" : "<red>✘ 未准备")));
+                        + (id.equals(game.host) ? " <gold>[房主]" : "")
+                        + (isSelf ? " <aqua>(你)" : "")).decoration(TextDecoration.ITALIC, false));
+                meta.lore(List.of(
+                        MineUnoPlugin.mm("<gray>座位：<white>#" + seat).decoration(TextDecoration.ITALIC, false),
+                        MineUnoPlugin.mm(ready ? "<green>✔ 已准备" : "<red>✘ 未准备").decoration(TextDecoration.ITALIC, false)));
             });
             inv.setItem(slot++, head);
         }
+        fillEmpty(inv, Material.GRAY_STAINED_GLASS_PANE, 9, 17);
         boolean ready = game.ready.contains(player.getUniqueId());
         inv.setItem(20, item(ready ? Material.RED_CONCRETE : Material.LIME_CONCRETE,
-                ready ? "<red>取消准备" : "<green>准备", List.of()));
+                ready ? "<red><bold>取消准备" : "<green><bold>准备",
+                List.of(ready ? "<gray>点击取消准备状态" : "<gray>点击准备，等待房主开局")));
         int min = plugin.cfg("game.min-players", 2);
         List<String> notReady = new ArrayList<>();
         for (UUID id : game.order()) if (!game.ready.contains(id)) notReady.add(name(id));
         boolean isHost = player.getUniqueId().equals(game.host);
+        boolean canStart = isHost && notReady.isEmpty() && game.count() >= min;
         List<String> startLore = new ArrayList<>();
         startLore.add("<gray>人数：<white>" + game.count() + "/" + game.maxPlayers + (game.count() < min ? " <red>（至少 " + min + " 人）" : ""));
         startLore.add(notReady.isEmpty() ? "<green>所有玩家已准备" : "<red>未准备：" + String.join("、", notReady));
         if (!isHost) startLore.add("<red>只有房主可以开始");
-        inv.setItem(24, item(isHost && notReady.isEmpty() && game.count() >= min ? Material.EMERALD_BLOCK : Material.GRAY_STAINED_GLASS_PANE,
-                "<yellow>开始游戏", startLore));
-        inv.setItem(22, item(Material.BARRIER, "<red>离开房间", List.of()));
-        inv.setItem(26, item(Material.PAPER, "<gray>关掉界面后回到房间",
-                List.of("<gray>输入 <white>/uno <gray>重新打开")));
+        else if (canStart) startLore.add("<yellow>▶ 点击开始牌局");
+        inv.setItem(24, item(canStart ? Material.EMERALD_BLOCK : Material.GRAY_STAINED_GLASS_PANE,
+                canStart ? "<green><bold>开始游戏" : isHost ? "<yellow>等待全部准备" : "<gray>开始游戏（仅房主）", startLore));
+        inv.setItem(22, item(Material.BARRIER, "<red>离开房间", List.of("<gray>返回大厅")));
+        inv.setItem(26, item(Material.PAPER, "<gray>回到游戏世界",
+                List.of("<gray>关闭此界面仍留在房间内", "<gray>输入 <white>/uno <gray>重新打开")));
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 18, 26);
         later(player, () -> player.openInventory(inv));
     }
 
@@ -278,29 +315,52 @@ public class Menus {
 
     /** 手牌已经是 3D 实体，这里只放操作按钮。 */
     public void openPanel(Player player, Game game) {
-        Inventory inv = create("panel", game.id, 3, "<dark_gray>控制面板 · " + game.name
-                + (game.mode == Game.Mode.CLASSIC ? " <gray>· <gold>" + game.scores.getOrDefault(player.getUniqueId(), 0) + " 分" : ""));
-        boolean postDraw = game.phase == Game.Phase.POST_DRAW && player.getUniqueId().equals(game.current());
-        inv.setItem(10, item(Material.PAPER, "<white>摸牌", List.of("<gray>从牌堆摸一张", "<gray>也可以直接右键")));
+        Inventory inv = create("panel", game.id, 3, "<dark_gray><bold>控制面板</bold> <dark_gray>· " + game.name
+                + (game.mode == Game.Mode.CLASSIC ? " · <gold>" + game.scores.getOrDefault(player.getUniqueId(), 0) + " 分" : ""));
+        UUID uid = player.getUniqueId();
+        boolean myTurn = uid.equals(game.current()) && game.phase == Game.Phase.PLAYING;
+        boolean postDraw = uid.equals(game.current()) && game.phase == Game.Phase.POST_DRAW;
+        int myHand = game.hand(uid).size();
+        boolean canCatchSelf = myHand == 1 && uid.equals(game.vulnerable);
+        Card top = game.top();
+        Material colorMat = switch (game.activeColor) {
+            case RED -> Material.RED_CONCRETE;
+            case YELLOW -> Material.YELLOW_CONCRETE;
+            case GREEN -> Material.LIME_CONCRETE;
+            case BLUE -> Material.BLUE_CONCRETE;
+            default -> Material.MAGENTA_CONCRETE;
+        };
+        inv.setItem(4, item(colorMat, "<gold><bold>当前局势", List.of(
+                "<gray>回合：<white>" + name(game.current()) + (uid.equals(game.current()) ? " <green>(你)" : ""),
+                "<gray>有效色：<white><" + game.activeColor.tag + ">" + game.activeColor.cn + "色",
+                "<gray>上一张：" + (top == null ? "<gray>—" : top.coloredName()),
+                "<gray>方向：<white>" + (game.dir > 0 ? "顺时针 ↻" : "逆时针 ↺") + " <dark_gray>| <gray>手牌：<white>" + myHand + " 张")));
+        inv.setItem(10, item(Material.PAPER, myTurn ? "<green><bold>摸牌" : "<gray>摸牌（当前不可摸）",
+                myTurn ? List.of("<gray>从牌堆摸 1 张", "<gray>也可在牌桌直接右键") : List.of("<gray>仅轮到你出牌时可用")));
         inv.setItem(12, item(postDraw ? Material.LIME_CONCRETE : Material.GRAY_CONCRETE,
-                postDraw ? "<yellow>结束回合" : "<dark_gray>结束回合",
+                postDraw ? "<yellow><bold>结束回合" : "<gray>结束回合（不可用）",
                 postDraw ? List.of("<gray>放弃打出刚摸到的牌") : List.of("<gray>摸牌后才可以结束回合")));
-        inv.setItem(14, item(Material.GOLD_INGOT, "<gold><bold>UNO!", List.of("<gray>剩 2 张时提前喊，剩 1 张时可补喊")));
+        inv.setItem(14, item(Material.GOLD_INGOT,
+                canCatchSelf ? "<red><bold>UNO!（快补喊！）" : myHand == 2 ? "<gold><bold>UNO!（可提前喊）" : "<yellow>UNO!",
+                List.of("<gray>剩 2 张时提前喊，剩 1 张时可补喊")));
         inv.setItem(16, item(Material.BOOK, "<yellow>规则与教程", List.of("<gray>玩法 / 功能牌 / 质疑 / 操作")));
         inv.setItem(22, item(Material.RED_CONCRETE, "<red>离开牌局", List.of("<gray>游戏中离开视为弃权")));
         inv.setItem(26, item(Material.BARRIER, "<red>关闭", List.of()));
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 0, 26);
         later(player, () -> player.openInventory(inv));
     }
 
     // ---------- 选色 / 质疑 ----------
 
     public void openColor(Player player, Game game) {
-        Inventory inv = create("color", game.id, 3, "<gold>选择颜色");
+        Inventory inv = create("color", game.id, 3, "<gold><bold>选择颜色");
+        inv.setItem(4, item(Material.NETHER_STAR, "<gold><bold>万能牌选色", List.of("<gray>请选择接下来的有效颜色")));
         int[] slots = {10, 12, 14, 16};
         for (int i = 0; i < 4; i++) {
             Card.Color color = Card.COLORS.get(i);
             inv.setItem(slots[i], colorIcon(color));
         }
+        fillEmpty(inv, Material.BLACK_STAINED_GLASS_PANE, 0, 26);
         later(player, () -> player.openInventory(inv));
     }
 
